@@ -1,0 +1,21 @@
+# Credentials & secrets
+config/.env
+config/credentials.json
+config/slack_bot_token.txt
+config/slack_webhook.txt
+.streamlit/secrets.toml
+*.json.backup
+
+# Runtime data
+data/*.json
+output/logs/*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
