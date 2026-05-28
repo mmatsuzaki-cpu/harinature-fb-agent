@@ -297,55 +297,12 @@ def render_brand_header():
     st.markdown('<div class="brand-divider"></div>', unsafe_allow_html=True)
 
 
-# ── パスワード認証 ────────────────────────────────────
-
-def check_password():
-    """松崎さん設定のパスワードでログイン
-    URL クエリパラメータ ?key=xxx でも自動ログイン可
-    例: https://harinature-fb.streamlit.app/?key=miraihari5721!
-    """
-    APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
-
-    try:
-        url_key = st.query_params.get("key", "")
-    except Exception:
-        url_key = st.experimental_get_query_params().get("key", [""])[0]
-    if url_key and url_key == APP_PASSWORD:
-        st.session_state["password_correct"] = True
-
-    def password_entered():
-        if st.session_state.get("password") == APP_PASSWORD:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
-
-    if st.session_state.get("password_correct", False):
-        return True
-
-    st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
-    render_brand_header()
-    st.markdown(
-        '<p class="app-subtitle">パスワードを入力してください</p>',
-        unsafe_allow_html=True,
-    )
-    st.text_input(
-        "パスワード", type="password", on_change=password_entered,
-        key="password", label_visibility="collapsed",
-        placeholder="パスワード",
-    )
-    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
-        st.error("パスワードが違います")
-    st.markdown('</div>', unsafe_allow_html=True)
-    return False
-
-
 # ── メイン画面 ────────────────────────────────────────
+# パスワード認証は廃止(スタッフが手間なく即アクセスできるように)
+# URL直アクセスで誰でも利用可能
+# ※ 録音音声は処理後即削除・Notionには会員情報のみ保存 で個人情報保護
 
 def main():
-    if not check_password():
-        st.stop()
-
     render_brand_header()
 
     st.markdown('<h2 class="app-title">FB SYSTEM</h2>', unsafe_allow_html=True)
@@ -376,7 +333,7 @@ def main():
     with col1:
         store = st.selectbox("店舗", STORE_OPTIONS, index=0, key="store_select")
     with col2:
-        staff_name = st.text_input("ハリザーブの名前", placeholder="例: 松崎 未来", key="staff_name_input")
+        staff_name = st.text_input("ハリザーブの名前", placeholder="例：松崎未来、MIRAI", key="staff_name_input")
     session_date = st.date_input("施術日", value=date.today(), key="session_date_input")
 
     st.markdown('<div class="section-title">CONTRACT RESULT</div>', unsafe_allow_html=True)
@@ -384,9 +341,9 @@ def main():
     with col3:
         contract = st.selectbox(
             "入会の有無",
-            ["なし", "検討", "あり"],
+            ["なし", "あり"],
             index=0,
-            help="なし=失注 / 検討=後日決定持ち帰り / あり=その場で入会",
+            help="契約成立の有無を選んでね",
             key="contract_select",
         )
     with col4:
@@ -399,7 +356,7 @@ def main():
             help="入会ありの場合に選択",
             key="course_select",
         )
-    # 「なし」「検討」を選んだら course を強制的に "—"
+    # 「なし」を選んだら course を強制的に "—"
     if not is_contract:
         course = "—"
 

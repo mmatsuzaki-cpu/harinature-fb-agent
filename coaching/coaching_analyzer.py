@@ -132,8 +132,7 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 
 【FB視点の使い分け】
 - 契約「あり」の場合 → 「定着サポート視点」(継続モチベ・次回ゴール・3ヶ月後の中間カウンセリングへの繋ぎ方)
-- 契約「検討」の場合 → 「クロージング強化視点」(なぜその場で決められなかったか/3ヶ月だけ任せて欲しい言い切りが足りなかったか/入会金無料の伝え方タイミング/危機感の押し弱)
-- 契約「なし」の場合 → 「失注分析視点」(7つの感のどれが弱かったか/危機感トークの不足/「他でもいい」フレーズの欠如)
+- 契約「なし」の場合 → 「失注分析視点」(7つの感のどれが弱かったか/危機感トークの不足/「他でもいい」フレーズの欠如/3ヶ月提案の言い切り不足/入会金無料の伝え方タイミング)
 
 【FB生成時の必須チェック】
 - 「7つの感」のどれが弱かったかを必ず1つ以上指摘
@@ -193,12 +192,7 @@ def call_gemini(transcript: str, staff_name: str, session_date,
 
     customer_info = customer_info or {}
     leader_fb = fetch_leader_fb_examples(transcript)
-    if contract == "あり":
-        contract_status = "🎉 契約獲得"
-    elif contract == "検討":
-        contract_status = "🤔 検討中(後日決定持ち帰り)"
-    else:
-        contract_status = "🥲 契約なし(失注)"
+    contract_status = "🎉 契約獲得" if contract == "あり" else "🥲 契約なし(失注)"
     course_label = course if (contract == "あり" and course not in ("", "—", None)) else "(未入会)"
     prompt = EVAL_PROMPT_TEMPLATE.format(
         store=store or "(未指定)",
@@ -249,8 +243,6 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
         contract_line = f"🎉 *契約獲得* ({course})"
     elif contract == "あり":
         contract_line = "🎉 *契約獲得*"
-    elif contract == "検討":
-        contract_line = "🤔 *検討中* (後日決定持ち帰り)"
     else:
         contract_line = "🥲 契約なし"
 
