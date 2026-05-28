@@ -1,0 +1,32 @@
+name: sync_leader_fb
+
+# Slackスレッド返信 → Notion「リーダーFB」フィールドに自動同期
+# 毎日 10:00 JST = 01:00 UTC に実行(松崎さんの朝のチェック時間に間に合うように)
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:  # 手動実行も可能
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Sync leader FB from Slack thread replies
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_FB_HISTORY_DB_ID: ${{ secrets.NOTION_FB_HISTORY_DB_ID }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_FEEDBACK_CHANNEL_ID: ${{ secrets.SLACK_FEEDBACK_CHANNEL_ID }}
+          LOOKBACK_DAYS: "14"
+        run: python scripts/sync_leader_fb.py

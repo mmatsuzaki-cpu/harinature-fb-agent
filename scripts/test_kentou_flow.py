@@ -112,12 +112,16 @@ print(result.get("good_points", "(なし)"))
 print(f"\n🍃 改善点:")
 print(result.get("improvements", "(なし)"))
 
-# 2) Slack 通知
+# 2) Slack 通知 (ts/permalink を取得)
 print("\n⏳ Slack に通知中...")
-coaching_analyzer.send_slack_notifications(
+slack_meta = coaching_analyzer.send_slack_notifications(
     "【テスト】松崎 未来", date.today(), result
-)
-print("✅ Slack #ハリナチュレ_新規振り返り に投稿 + 松崎DMに完了通知")
+) or {}
+print(f"✅ Slack 投稿成功")
+print(f"   ts: {slack_meta.get('ts')}")
+print(f"   permalink: {slack_meta.get('permalink')}")
+result["slack_ts"] = slack_meta.get("ts", "")
+result["slack_permalink"] = slack_meta.get("permalink", "")
 
 # 3) Notion 保存
 print("\n⏳ Notion に保存中...")
@@ -125,3 +129,5 @@ url = coaching_analyzer.save_to_notion(
     "【テスト】松崎 未来", date.today(), result
 )
 print(f"✅ Notion保存完了 → {url}")
+print(f"\n👉 Slack のスレッドに何か返信してから次のコマンドで同期テスト:")
+print(f"   python3 scripts/sync_leader_fb.py")

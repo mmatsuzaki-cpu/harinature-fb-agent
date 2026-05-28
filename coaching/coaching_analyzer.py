@@ -227,14 +227,16 @@ def call_gemini(transcript: str, staff_name: str, session_date,
 
 # ── 3. Slack通知 ──────────────────────────────────
 
-def send_slack_notifications(staff_name: str, session_date, result: dict):
+def send_slack_notifications(staff_name: str, session_date, result: dict) -> dict:
     """Slack に通知:
     ① #ハリナチュレ_新規振り返り チャンネル投稿(全員見れる)
     ② 松崎さん完了通知DM
+    返り値: {"ts": "1234567890.123456", "permalink": "https://..."}
+            (リーダーFB同期スクリプトが後でスレッド返信を引っ張ってくる用)
     """
     import requests
     if not SLACK_BOT_TOKEN:
-        return
+        return {}
     H = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-Type": "application/json; charset=utf-8"}
 
     scores = result.get("scores", {})
@@ -276,8 +278,19 @@ def send_slack_notifications(staff_name: str, session_date, result: dict):
         f"🍃 *改善点*\n{result.get('improvements', '')}"
         f"{questions_block}"
     )
-    requests.post("https://slack.com/api/chat.postMessage", headers=H,
-                  json={"channel": SLACK_FEEDBACK_CHANNEL_ID, "text": channel_msg})
+    post_res = requests.post(
+        "https://slack.com/api/chat.postMessage", headers=H,
+        json={"channel": SLACK_FEEDBACK_CHANNEL_ID, "text": channel_msg},
+    ).json()
+    ts = post_res.get("ts", "")
+    permalink = ""
+    if ts:
+        pl_res = requests.get(
+            "https://slack.com/api/chat.getPermalink",
+            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+            params={"channel": SLACK_FEEDBACK_CHANNEL_ID, "message_ts": ts},
+        ).json()
+        permalink = pl_res.get("permalink", "")
 
     if SLACK_OWNER_USER_ID:
         dm_open = requests.post("https://slack.com/api/conversations.open",
@@ -287,6 +300,8 @@ def send_slack_notifications(staff_name: str, session_date, result: dict):
             requests.post("https://slack.com/api/chat.postMessage", headers=H,
                           json={"channel": dm_id,
                                 "text": f"✅ *ハリナチュレ育成FB処理完了*\n{staff_name} さん({session_date})の評価が #ハリナチュレ_新規振り返り に投稿されました🪡"})
+
+    return {"ts": ts, "permalink": permalink}
 
 
 # ── 4. Notion 蓄積 ────────────────────────────────
@@ -333,6 +348,8 @@ def save_to_notion(staff_name: str, session_date, result: dict) -> str:
     summary = result.get("session_summary", "")
     good_points = result.get("good_points", "")
     improvements = result.get("improvements", "")
+    slack_ts = result.get("slack_ts", "")
+    slack_permalink = result.get("slack_permalink", "")
 
     if hasattr(session_date, "isoformat"):
         date_str = session_date.isoformat()
@@ -355,7 +372,10 @@ def save_to_notion(staff_name: str, session_date, result: dict) -> str:
         "改善点": {"rich_text": _rich_text(improvements)},
         "疑問点": {"rich_text": _rich_text(questions)},
         "文字起こし全文": {"rich_text": _rich_text(transcript)},
+        "Slack ts": {"rich_text": _rich_text(slack_ts)},
     }
+    if slack_permalink:
+        properties["Slackスレッド"] = {"url": slack_permalink}
 
     if store:
         properties["店舗"] = {"select": {"name": store}}
@@ -415,7 +435,9 @@ def analyze_session(audio_file, staff_name: str, session_date,
         result["questions"] = questions
         result["customer_info"] = customer_info or {}
 
-        send_slack_notifications(staff_name, session_date, result)
+        slack_meta = send_slack_notifications(staff_name, session_date, result) or {}
+        result["slack_ts"] = slack_meta.get("ts", "")
+        result["slack_permalink"] = slack_meta.get("permalink", "")
 
         notion_url = save_to_notion(staff_name, session_date, result)
         if notion_url:
