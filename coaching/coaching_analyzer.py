@@ -38,22 +38,10 @@ except Exception:
     SLACK_OWNER_USER_ID = os.environ.get("SLACK_OWNER_USER_ID", "")
 
 
-# ── 1. 文字起こし(faster-whisper) ────────────────
+# ── 1. AI評価 + FB生成(Gemini Flash 音声入力ネイティブ) ──
 
-def transcribe_audio(audio_path: str) -> str:
-    """faster-whisper で音声を文字起こし
-    モデルは "base"(74MB、日本語OK、Streamlit Cloud 1GBメモリで動く)
-    """
-    from faster_whisper import WhisperModel
-    model = WhisperModel("base", device="cpu", compute_type="int8")
-    segments, info = model.transcribe(audio_path, language="ja", vad_filter=True)
-    text = "".join(seg.text for seg in segments)
-    return text.strip()
-
-
-# ── 2. AI評価 + FB生成(Gemini Flash) ──────────────
-
-EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATURE」の教育担当として、新人スタッフの新規カウンセリング録音を評価します。
+EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATURE」の教育担当として、
+添付された新人スタッフの新規カウンセリング録音を直接聴いて評価します。
 
 【店舗】 {store}
 【スタッフ名】 {staff_name}
@@ -66,9 +54,6 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 - 仕事: {customer_job}
 - 悩み: {customer_concerns}
 - 既往歴: {customer_history}
-
-【カウンセリング録音(文字起こし)】
-{transcript}
 
 【参考にするリーダーFB事例集(過去類似ケース)】
 {leader_fb_examples}
@@ -140,8 +125,15 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 - 「ハリナチュレじゃなくてもいい」フレーズが入っていたか確認
 - 改善提案は上記スクリプトをベースに、お客様の状況に合わせてパーソナライズ
 
+【処理手順】
+1. 添付の音声ファイルを最初から最後まで聴いて、日本語で文字起こし
+2. その文字起こしに基づいて評価項目4軸を採点
+3. 振り返り要約・良かった点・改善点を生成
+4. 全てを下記JSONで一度に出力
+
 【出力形式(JSON厳守)】
 {{
+  "transcript": "<音声全体を日本語で正確に文字起こし(発話者の区別不要・段落分け推奨)>",
   "scores": {{"hearing": <int>, "proposal": <int>, "closing": <int>, "tone": <int>}},
   "session_summary": "<カウンセリング録音の要約(お客様の年齢/職業/主訴/提案内容/お客様の反応の流れを箇条書きで200〜400字程度・マークダウン)>",
   "good_points": "<良かったポイントを具体的に3つ箇条書き(マークダウン)。7つの感のどれが機能していたか言及>",
@@ -152,7 +144,7 @@ JSONのみ出力。コメントや説明は不要。
 """
 
 
-def fetch_leader_fb_examples(transcript: str, n: int = 3) -> str:
+def fetch_leader_fb_examples(n: int = 3) -> str:
     """Notion リーダーFB事例集から類似ケースを取得して要約"""
     if not NOTION_TOKEN or not NOTION_LEADER_FB_DB_ID:
         return "(リーダーFB事例なし)"
@@ -180,18 +172,35 @@ def fetch_leader_fb_examples(transcript: str, n: int = 3) -> str:
         return f"(取得失敗: {e})"
 
 
-def call_gemini(transcript: str, staff_name: str, session_date,
-                customer_info: dict = None,
-                contract: str = "なし", course: str = "—", store: str = "") -> dict:
-    """Gemini Flash で評価生成"""
+def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
+                           customer_info: dict = None,
+                           contract: str = "なし", course: str = "—", store: str = "") -> dict:
+    """Gemini Flash 2.5 に音声ファイルを直接渡して、
+    文字起こし + 評価 + FB生成 を1リクエストで完結する。
+    faster-whisper を介さないので大幅高速化。
+    """
+    import time
     import google.generativeai as genai
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY 未設定")
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.5-flash")
 
+    # ── ① 音声ファイルを Gemini File API にアップロード ──
+    uploaded = genai.upload_file(path=audio_path)
+    # ファイルが ACTIVE になるまで待機(通常 数秒)
+    for _ in range(60):
+        if uploaded.state.name == "ACTIVE":
+            break
+        if uploaded.state.name == "FAILED":
+            raise RuntimeError("Gemini File アップロード失敗")
+        time.sleep(2)
+        uploaded = genai.get_file(uploaded.name)
+    else:
+        raise RuntimeError("Gemini File アップロード タイムアウト(120秒)")
+
+    # ── ② プロンプト組み立て ──
     customer_info = customer_info or {}
-    leader_fb = fetch_leader_fb_examples(transcript)
+    leader_fb = fetch_leader_fb_examples()
     contract_status = "🎉 契約獲得" if contract == "あり" else "🥲 契約なし(失注)"
     course_label = course if (contract == "あり" and course not in ("", "—", None)) else "(未入会)"
     prompt = EVAL_PROMPT_TEMPLATE.format(
@@ -204,11 +213,27 @@ def call_gemini(transcript: str, staff_name: str, session_date,
         customer_job=customer_info.get("job", "(未入力)"),
         customer_concerns=customer_info.get("concerns", "(未入力)"),
         customer_history=customer_info.get("history", "(未入力)"),
-        transcript=transcript[:8000],
         leader_fb_examples=leader_fb,
     )
 
-    response = model.generate_content(prompt)
+    # ── ③ Gemini 呼び出し(音声 + プロンプト) ──
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    response = model.generate_content(
+        [uploaded, prompt],
+        generation_config={
+            "temperature": 0.2,
+            "response_mime_type": "application/json",
+        },
+        request_options={"timeout": 600},  # 10分タイムアウト
+    )
+
+    # ── ④ ファイル削除(個人情報保護: Gemini側にも残さない) ──
+    try:
+        genai.delete_file(uploaded.name)
+    except Exception:
+        pass
+
+    # ── ⑤ JSON パース ──
     text = response.text.strip()
     m = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
     if m:
@@ -415,12 +440,11 @@ def analyze_session(audio_file, staff_name: str, session_date,
         tmp_path = tmp.name
 
     try:
-        transcript = transcribe_audio(tmp_path)
-
-        result = call_gemini(transcript, staff_name, session_date,
-                             customer_info=customer_info,
-                             contract=contract, course=course, store=store)
-        result["transcript"] = transcript
+        # Gemini Audio: 文字起こし + 評価を1リクエストで完結
+        result = call_gemini_with_audio(tmp_path, staff_name, session_date,
+                                        customer_info=customer_info,
+                                        contract=contract, course=course, store=store)
+        # transcript は Gemini が JSON で返してくる(キー名は "transcript")
         result["contract"] = contract
         result["course"] = course
         result["store"] = store
