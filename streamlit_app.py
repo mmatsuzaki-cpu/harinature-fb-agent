@@ -423,17 +423,17 @@ def main():
             "history": history.strip(),
         }
         from coaching.coaching_analyzer import analyze_session
-        # ファイルサイズに応じた予測時間
+        # ファイルサイズに応じた予測時間(Gemini Audio用)
         size_mb = audio_file.size / 1024 / 1024
-        est_low = max(3, int(size_mb * 0.3))
-        est_high = max(5, int(size_mb * 0.7))
+        est_low = max(1, int(size_mb * 0.03))
+        est_high = max(2, int(size_mb * 0.10))
         spinner_msg = (
-            f"📁 {size_mb:.1f}MB の音声を処理中... 予測 {est_low}〜{est_high}分かかります💕\n\n"
+            f"📁 {size_mb:.1f}MB の音声を Gemini Audio で処理中... 予測 {est_low}〜{est_high}分💕\n\n"
             f"完了するとSlackに通知が届くから、このタブはそのまま開いておいてね"
         )
         st.info(
-            f"⏱ **処理時間の目安**: 録音 30分 → 約5〜15分 / 録音 60分 → 約15〜40分\n\n"
-            f"今回のファイル({size_mb:.1f}MB)は **約{est_low}〜{est_high}分** かかる見込みです✨"
+            f"⏱ **処理時間の目安(Gemini Audio)**: 30分録音 → 約30秒〜1.5分 / 60分録音 → 約1〜3分\n\n"
+            f"今回のファイル({size_mb:.1f}MB)は **約{est_low}〜{est_high}分** で完了見込み✨"
         )
         with st.spinner(spinner_msg):
             try:

@@ -216,16 +216,40 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
         leader_fb_examples=leader_fb,
     )
 
-    # ── ③ Gemini 呼び出し(音声 + プロンプト) ──
+    # ── ③ Gemini 呼び出し(音声 + プロンプト) - 429リトライ対応 ──
     model = genai.GenerativeModel("gemini-2.5-flash")
-    response = model.generate_content(
-        [uploaded, prompt],
-        generation_config={
-            "temperature": 0.2,
-            "response_mime_type": "application/json",
-        },
-        request_options={"timeout": 600},  # 10分タイムアウト
-    )
+    last_error = None
+    response = None
+    for attempt in range(4):
+        try:
+            response = model.generate_content(
+                [uploaded, prompt],
+                generation_config={
+                    "temperature": 0.2,
+                    "response_mime_type": "application/json",
+                },
+                request_options={"timeout": 600},  # 10分タイムアウト
+            )
+            break
+        except Exception as e:
+            last_error = e
+            err_str = str(e)
+            # 429 quota error は自動リトライ(最大3回)
+            if "429" in err_str or "quota" in err_str.lower() or "ResourceExhausted" in err_str:
+                if attempt >= 3:
+                    raise RuntimeError(
+                        f"Gemini APIレート制限が続いています💦 1分後にもう一度試してね\n"
+                        f"詳細: {err_str[:200]}"
+                    )
+                # retry_delay秒数を抽出(なければ40秒)
+                wait_match = re.search(r"retry[_\s]*delay[^\d]*(\d+)", err_str)
+                wait = int(wait_match.group(1)) + 5 if wait_match else 40
+                time.sleep(wait)
+                continue
+            # その他のエラーは即fail
+            raise
+    if response is None:
+        raise RuntimeError(f"Gemini呼び出し失敗: {last_error}")
 
     # ── ④ ファイル削除(個人情報保護: Gemini側にも残さない) ──
     try:
