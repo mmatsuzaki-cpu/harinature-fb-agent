@@ -384,7 +384,8 @@ def main():
             "録音ファイル",
             type=["m4a", "mp3", "wav", "mp4", "aac"],
             label_visibility="collapsed",
-            help="新規カウンセリング・施術・クロージングの録音",
+            help=("新規カウンセリング・施術・クロージングの録音\n\n"
+                  "⏱ 目安: 30分録音 → 約5〜15分 / 60分録音 → 約15〜40分の処理時間"),
         )
 
         st.markdown('<div class="section-title">QUESTIONS (OPTIONAL)</div>', unsafe_allow_html=True)
@@ -422,7 +423,19 @@ def main():
             "history": history.strip(),
         }
         from coaching.coaching_analyzer import analyze_session
-        with st.spinner("文字起こし + AI評価中...  1〜2分かかります"):
+        # ファイルサイズに応じた予測時間
+        size_mb = audio_file.size / 1024 / 1024
+        est_low = max(3, int(size_mb * 0.3))
+        est_high = max(5, int(size_mb * 0.7))
+        spinner_msg = (
+            f"📁 {size_mb:.1f}MB の音声を処理中... 予測 {est_low}〜{est_high}分かかります💕\n\n"
+            f"完了するとSlackに通知が届くから、このタブはそのまま開いておいてね"
+        )
+        st.info(
+            f"⏱ **処理時間の目安**: 録音 30分 → 約5〜15分 / 録音 60分 → 約15〜40分\n\n"
+            f"今回のファイル({size_mb:.1f}MB)は **約{est_low}〜{est_high}分** かかる見込みです✨"
+        )
+        with st.spinner(spinner_msg):
             try:
                 result = analyze_session(
                     audio_file, staff_name, session_date,
