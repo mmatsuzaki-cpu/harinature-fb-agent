@@ -217,10 +217,11 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
     )
 
     # ── ③ Gemini 呼び出し(音声 + プロンプト) - 429リトライ対応 ──
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    # gemini-2.0-flash: 無料枠 10 RPM (gemini-2.5-flash の倍)
+    model = genai.GenerativeModel("gemini-2.0-flash")
     last_error = None
     response = None
-    for attempt in range(4):
+    for attempt in range(6):
         try:
             response = model.generate_content(
                 [uploaded, prompt],
@@ -234,16 +235,17 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
         except Exception as e:
             last_error = e
             err_str = str(e)
-            # 429 quota error は自動リトライ(最大3回)
+            # 429 quota error は自動リトライ(最大5回)
             if "429" in err_str or "quota" in err_str.lower() or "ResourceExhausted" in err_str:
-                if attempt >= 3:
+                if attempt >= 5:
                     raise RuntimeError(
-                        f"Gemini APIレート制限が続いています💦 1分後にもう一度試してね\n"
+                        f"Gemini APIレート制限が続いています💦 数分後にもう一度試してね\n"
+                        f"継続するなら Google AI Studio で Tier 1 にアップグレード推奨(無料)\n"
                         f"詳細: {err_str[:200]}"
                     )
-                # retry_delay秒数を抽出(なければ40秒)
+                # retry_delay秒数を抽出(なければ70秒)
                 wait_match = re.search(r"retry[_\s]*delay[^\d]*(\d+)", err_str)
-                wait = int(wait_match.group(1)) + 5 if wait_match else 40
+                wait = int(wait_match.group(1)) + 10 if wait_match else 70
                 time.sleep(wait)
                 continue
             # その他のエラーは即fail
