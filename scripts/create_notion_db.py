@@ -26,7 +26,7 @@ COURSE_OPTIONS = [
     "美容特化 月3回", "トライアル", "次回予約(HPB)",
 ]
 AGE_OPTIONS = ["10代", "20代", "30代", "40代", "50代", "60代", "70代以上", "—"]
-CONTRACT_OPTIONS = ["あり", "なし"]
+CONTRACT_OPTIONS = ["あり", "検討", "なし"]
 
 if not NOTION_TOKEN:
     print("NOTION_TOKEN が未設定です")
@@ -53,6 +53,7 @@ payload = {
         "店舗": {"select": {"options": _select_options(STORE_OPTIONS, "green")}},
         "契約結果": {"select": {"options": [
             {"name": "あり", "color": "green"},
+            {"name": "検討", "color": "yellow"},
             {"name": "なし", "color": "gray"},
         ]}},
         "コース": {"select": {"options": _select_options(COURSE_OPTIONS, "default")}},

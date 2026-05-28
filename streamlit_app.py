@@ -376,30 +376,31 @@ def main():
     with col1:
         store = st.selectbox("店舗", STORE_OPTIONS, index=0, key="store_select")
     with col2:
-        staff_name = st.text_input("スタッフ名", placeholder="例: MIRAI", key="staff_name_input")
-    session_date = st.date_input("セッション日", value=date.today(), key="session_date_input")
+        staff_name = st.text_input("ハリザーブの名前", placeholder="例: 松崎 未来", key="staff_name_input")
+    session_date = st.date_input("施術日", value=date.today(), key="session_date_input")
 
     st.markdown('<div class="section-title">CONTRACT RESULT</div>', unsafe_allow_html=True)
     col3, col4 = st.columns(2)
     with col3:
         contract = st.selectbox(
             "入会の有無",
-            ["なし", "あり"],
+            ["なし", "検討", "あり"],
             index=0,
-            help="契約成立の有無を選んでね",
+            help="なし=失注 / 検討=後日決定持ち帰り / あり=その場で入会",
             key="contract_select",
         )
     with col4:
-        is_no_contract = (contract == "なし")
+        is_contract = (contract == "あり")
         course = st.selectbox(
             "コース(入会ありの場合のみ)",
             COURSE_OPTIONS,
             index=0,
-            disabled=is_no_contract,
+            disabled=not is_contract,
             help="入会ありの場合に選択",
             key="course_select",
         )
-    if is_no_contract:
+    # 「なし」「検討」を選んだら course を強制的に "—"
+    if not is_contract:
         course = "—"
 
     with st.form("upload_form"):
@@ -442,7 +443,7 @@ def main():
     if submitted:
         errors = []
         if not staff_name:
-            errors.append("スタッフ名")
+            errors.append("ハリザーブの名前")
         if age == "—":
             errors.append("年齢")
         if not job.strip():
