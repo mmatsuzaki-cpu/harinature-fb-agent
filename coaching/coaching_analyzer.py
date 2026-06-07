@@ -20,15 +20,17 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# 並列文字起こしの設定(Free Tier 10 RPM 最適化版)
-# 60分音声(56MB)を確実に処理するための戦略:
-#   - 10分チャンク × 6個 = 6リクエスト/分 < 10件枠 ✓
-#   - 並列3 + 6秒スタッガで quota消費を平準化
-#   - 60分音声 → 約3〜4分で完了
-CHUNK_MINUTES = 10  # 1チャンクの長さ(分)
-MAX_PARALLEL_WORKERS = 3  # 同時並列リクエスト数
-CHUNK_STAGGER_SECONDS = 6  # チャンク投入の時間差(秒) = 60秒/10件
-SINGLE_FILE_SIZE_LIMIT_MB = 20  # この値以下は分割せず一発処理
+# 並列文字起こしの設定(Tier 1 + 暴走対策)
+# 戦略:
+#   - 5分チャンクで細かく分割(長尺音声でのモデル暴走/無限ループを防止)
+#   - 各チャンクは max_output_tokens で出力上限を設定
+#   - チャンク文字起こし → テキスト評価 の2段構えで安定化
+CHUNK_MINUTES = 5   # 1チャンクの長さ(分) ※短くしてループ暴走防止
+MAX_PARALLEL_WORKERS = 4  # 同時並列リクエスト数(Tier 1)
+CHUNK_STAGGER_SECONDS = 2  # チャンク投入の時間差(秒)
+SINGLE_FILE_SIZE_LIMIT_MB = 8  # これ以下のみ一発処理(長尺は必ずチャンク分割)
+# 1チャンク(5分)の文字起こし上限トークン(暴走時の保険)
+CHUNK_MAX_OUTPUT_TOKENS = 8000
 
 # 環境変数読み込み(Streamlit Cloud では st.secrets、ローカルでは .env)
 try:
@@ -243,7 +245,32 @@ def fetch_leader_fb_examples(n: int = 3) -> str:
 
 TRANSCRIBE_PROMPT = """添付の音声を日本語で正確に文字起こししてください。
 発話者の区別は不要、自然な改行・段落分けを推奨。
-文字起こしのみを返してください(他の説明・タイムコード・話者ラベルは不要)。"""
+文字起こしのみを返してください(他の説明・タイムコード・話者ラベルは不要)。
+重要: 無音・雑音部分では何も書かないこと。同じ文を繰り返さないこと。"""
+
+
+def _strip_loops(text: str) -> str:
+    """モデル暴走で同じフレーズが連続したものを除去
+    (例:「はい、HARI NATUREです。」×100回)
+    """
+    if not text:
+        return text
+    # 句点・改行で分割して、直前と同じ文が3回以上続いたら以降カット
+    parts = re.split(r'(?<=[。\n])', text)
+    cleaned = []
+    prev = None
+    repeat = 0
+    for p in parts:
+        ps = p.strip()
+        if ps and ps == prev:
+            repeat += 1
+            if repeat >= 2:  # 同じ文が3回目以降はスキップ
+                continue
+        else:
+            repeat = 0
+            prev = ps
+        cleaned.append(p)
+    return "".join(cleaned)
 
 
 def _gemini_call_with_retry(model, contents, generation_config=None, timeout=600, max_retries=5):
@@ -371,12 +398,15 @@ def transcribe_single_chunk(chunk_path: str, chunk_index: int = 0) -> str:
     else:
         raise RuntimeError(f"チャンク{chunk_index}: アップロード タイムアウト")
 
-    # ② 文字起こし
+    # ② 文字起こし(max_output_tokensで暴走時の出力上限を設定)
     model = genai.GenerativeModel("gemini-2.5-flash")
     response = _gemini_call_with_retry(
         model,
         [uploaded, TRANSCRIBE_PROMPT],
-        generation_config={"temperature": 0.1},
+        generation_config={
+            "temperature": 0.1,
+            "max_output_tokens": CHUNK_MAX_OUTPUT_TOKENS,
+        },
         timeout=300,
     )
 
@@ -386,7 +416,15 @@ def transcribe_single_chunk(chunk_path: str, chunk_index: int = 0) -> str:
     except Exception:
         pass
 
-    return response.text.strip()
+    # ④ ループ暴走の除去
+    try:
+        text = response.text.strip()
+    except Exception:
+        # finish_reason が MAX_TOKENS 等で .text が取れない場合
+        text = ""
+        if response.candidates and response.candidates[0].content.parts:
+            text = "".join(p.text for p in response.candidates[0].content.parts if hasattr(p, "text")).strip()
+    return _strip_loops(text)
 
 
 def transcribe_audio_parallel(audio_path: str, progress_callback=None) -> dict:
@@ -553,7 +591,7 @@ def evaluate_from_transcript(transcript: str, staff_name: str, session_date,
     text_prompt += f"\n\n【カウンセリング文字起こし】\n{transcript[:200000]}\n"
 
     model = genai.GenerativeModel("gemini-2.5-flash")
-    gen_config = {"temperature": 0.2, "response_mime_type": "application/json"}
+    gen_config = {"temperature": 0.2, "response_mime_type": "application/json", "max_output_tokens": 16000}
 
     # ── 第1試行 ──
     response = _gemini_call_with_retry(model, [text_prompt], generation_config=gen_config, timeout=600)
@@ -627,7 +665,7 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
 
     # ── ③ Gemini 呼び出し(音声 + プロンプト) - 429リトライ対応 ──
     model = genai.GenerativeModel("gemini-2.5-flash")
-    gen_config = {"temperature": 0.2, "response_mime_type": "application/json"}
+    gen_config = {"temperature": 0.2, "response_mime_type": "application/json", "max_output_tokens": 16000}
     response = _gemini_call_with_retry(model, [uploaded, prompt], generation_config=gen_config, timeout=600)
 
     # ── ④ ファイル削除(個人情報保護: Gemini側にも残さない) ──
