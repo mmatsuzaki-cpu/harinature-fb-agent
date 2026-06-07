@@ -392,18 +392,33 @@ def main():
 
         # お客様情報は AI が音声から自動抽出するので入力不要
         customer_info = {}
-        from coaching.coaching_analyzer import analyze_session
-        # ファイルサイズに応じた予測時間(Gemini Audio用)
+        from coaching.coaching_analyzer import analyze_session, SINGLE_FILE_SIZE_LIMIT_MB, CHUNK_MINUTES, MAX_PARALLEL_WORKERS
+        # ファイルサイズで処理方式を自動判定
         size_mb = audio_file.size / 1024 / 1024
-        est_low = max(1, int(size_mb * 0.03))
-        est_high = max(2, int(size_mb * 0.10))
+        if size_mb <= SINGLE_FILE_SIZE_LIMIT_MB:
+            mode_label = "🚀 一発処理モード"
+            est_low = max(1, int(size_mb * 0.05))
+            est_high = max(2, int(size_mb * 0.15))
+            mode_detail = f"{size_mb:.1f}MB → 通常処理(文字起こし+評価を1回で完結)"
+        else:
+            mode_label = "⚡️ 並列チャンク処理モード"
+            # チャンク数の推定: ファイルサイズ ≈ 1MB/分 (m4a 128kbps)
+            est_chunks = max(2, int(size_mb / CHUNK_MINUTES) + 1)
+            est_low = max(1, est_chunks // MAX_PARALLEL_WORKERS + 1)
+            est_high = max(2, est_chunks // MAX_PARALLEL_WORKERS + 3)
+            mode_detail = (
+                f"{size_mb:.1f}MB → {CHUNK_MINUTES}分ごとに約{est_chunks}チャンクへ分割、"
+                f"{MAX_PARALLEL_WORKERS}並列で文字起こし→評価生成"
+            )
+
         spinner_msg = (
-            f"📁 {size_mb:.1f}MB の音声を Gemini Audio で処理中... 予測 {est_low}〜{est_high}分💕\n\n"
+            f"{mode_label}: {size_mb:.1f}MB の音声を処理中... 予測 {est_low}〜{est_high}分💕\n\n"
             f"完了するとSlackに通知が届くから、このタブはそのまま開いておいてね"
         )
         st.info(
-            f"⏱ **処理時間の目安(Gemini Audio)**: 30分録音 → 約30秒〜1.5分 / 60分録音 → 約1〜3分\n\n"
-            f"今回のファイル({size_mb:.1f}MB)は **約{est_low}〜{est_high}分** で完了見込み✨"
+            f"⏱ **{mode_label}**\n\n"
+            f"{mode_detail}\n\n"
+            f"完了見込み: **約{est_low}〜{est_high}分** ✨"
         )
         with st.spinner(spinner_msg):
             try:
