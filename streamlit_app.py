@@ -686,7 +686,24 @@ def main():
                 st.error(f"処理失敗💦 {e}")
                 return
 
-        st.success("フィードバック生成完了")
+        st.success("✓ フィードバック生成完了")
+
+        # ── 処理統計(二重チェック結果) ──
+        stats = result.get("processing_stats", {})
+        if stats:
+            mode_jp = "一発処理" if stats.get("mode") == "single" else "並列チャンク処理"
+            stat_line = f"📊 {stats.get('size_mb','?')}MB · {mode_jp}"
+            if stats.get("mode") == "chunked":
+                ok = stats.get("chunks", 0) - stats.get("failed_chunks", 0)
+                stat_line += f" · チャンク {ok}/{stats.get('chunks',0)} 成功"
+                if stats.get("transcript_length"):
+                    stat_line += f" · 文字起こし {stats['transcript_length']:,}文字"
+            st.caption(stat_line)
+
+        # 警告(失敗チャンク等)
+        warnings = result.get("_warnings", [])
+        for w in warnings:
+            st.warning(w)
 
         st.markdown('<div class="section-title">Session Summary</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="result-card line">{result.get("session_summary", "(要約なし)")}</div>', unsafe_allow_html=True)
@@ -741,6 +758,20 @@ def main():
             st.markdown(f'<div class="result-card line">{questions.strip()}</div>', unsafe_allow_html=True)
 
         st.divider()
+
+        # ── 文字起こし全文(目視確認用 expander) ──
+        transcript_text = result.get("transcript", "")
+        if transcript_text:
+            char_count = len(transcript_text)
+            with st.expander(f"📝 文字起こし全文を確認  ·  {char_count:,}文字", expanded=False):
+                st.text_area(
+                    "文字起こし(編集不可・コピー可)",
+                    transcript_text,
+                    height=400,
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
+
         st.caption("✓ Slack #ハリナチュレ_新規振り返り に自動投稿済み  ·  振り返り内容 + 評価 + FB + 疑問点")
 
         notion_url = result.get("notion_url", "")

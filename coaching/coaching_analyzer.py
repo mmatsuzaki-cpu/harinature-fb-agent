@@ -352,15 +352,28 @@ def transcribe_single_chunk(chunk_path: str, chunk_index: int = 0) -> str:
     return response.text.strip()
 
 
-def transcribe_audio_parallel(audio_path: str) -> str:
-    """音声を分割→並列文字起こし→結合"""
+def transcribe_audio_parallel(audio_path: str, progress_callback=None) -> dict:
+    """音声を分割→並列文字起こし→結合
+    二重チェック機構:
+      ① 並列実行(第1ラウンド)
+      ② 失敗チャンクのみ直列リトライ(第2ラウンド)
+      ③ それでも失敗したチャンクは明示マーカーで挿入
+    返り値: {"transcript": str, "stats": {...}, "failed_chunks": [...]}
+    """
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
 
     chunks = split_audio_to_chunks(audio_path)
     chunk_count = len(chunks)
+    if progress_callback:
+        progress_callback(f"📦 {chunk_count}チャンクに分割完了")
+
+    transcripts = [""] * chunk_count
+    failed_first = []
+
     try:
-        transcripts = [""] * chunk_count
+        # ── 第1ラウンド: 並列実行 ──
+        completed = 0
         with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
             future_to_idx = {
                 executor.submit(transcribe_single_chunk, chunk, i): i
@@ -368,8 +381,45 @@ def transcribe_audio_parallel(audio_path: str) -> str:
             }
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
-                transcripts[idx] = future.result()
-        return "\n\n".join(t for t in transcripts if t)
+                try:
+                    transcripts[idx] = future.result()
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(f"✓ チャンク {completed}/{chunk_count} 完了")
+                except Exception as e:
+                    failed_first.append(idx)
+                    print(f"[Round1] Chunk {idx} failed: {e}")
+
+        # ── 第2ラウンド: 失敗チャンクのみ直列リトライ ──
+        failed_final = []
+        if failed_first:
+            if progress_callback:
+                progress_callback(f"🔄 {len(failed_first)}件のチャンクを再試行中...")
+            for idx in failed_first:
+                try:
+                    time.sleep(5)  # quota回復を待つ
+                    transcripts[idx] = transcribe_single_chunk(chunks[idx], idx)
+                    if progress_callback:
+                        progress_callback(f"✓ チャンク {idx+1} リトライ成功")
+                except Exception as e:
+                    failed_final.append(idx)
+                    transcripts[idx] = f"\n[⚠ チャンク{idx+1}: 文字起こし失敗 ({str(e)[:100]})]\n"
+                    print(f"[Round2] Chunk {idx} failed: {e}")
+
+        # 結合
+        full_transcript = "\n\n".join(t for t in transcripts if t)
+
+        stats = {
+            "total_chunks": chunk_count,
+            "success_chunks": chunk_count - len(failed_final),
+            "failed_chunks": len(failed_final),
+            "transcript_length": len(full_transcript),
+        }
+        return {
+            "transcript": full_transcript,
+            "stats": stats,
+            "failed_chunks": failed_final,
+        }
     finally:
         # チャンクファイル削除
         for chunk in chunks:
@@ -379,18 +429,76 @@ def transcribe_audio_parallel(audio_path: str) -> str:
                 pass
 
 
+REQUIRED_FIELDS = ["scores", "session_summary", "good_points", "improvements"]
+REQUIRED_SCORES = ["hearing", "proposal", "closing", "tone"]
+
+
+def _extract_json(text: str) -> str:
+    """レスポンステキストからJSON部分を抽出"""
+    text = text.strip()
+    m = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return text
+
+
+def _validate_result(result: dict) -> list:
+    """評価結果に必須フィールドが揃っているか確認、欠けているフィールドのリストを返す"""
+    missing = []
+    for f in REQUIRED_FIELDS:
+        if not result.get(f):
+            missing.append(f)
+    scores = result.get("scores", {})
+    for s in REQUIRED_SCORES:
+        if s not in scores:
+            missing.append(f"scores.{s}")
+    return missing
+
+
+def _parse_with_retry(model, response, generation_config, original_prompt):
+    """JSON パース失敗時に1回だけ再生成を試みる"""
+    text = _extract_json(response.text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # 再生成: テキストをパース可能な形に修正
+        repair_prompt = (
+            f"以下のテキストを有効なJSONに修正してください。"
+            f"既存のキー名と値は保持し、構文エラーのみ直してください。JSONのみ出力:\n\n{text[:8000]}"
+        )
+        try:
+            retry_response = _gemini_call_with_retry(
+                model, [repair_prompt],
+                generation_config=generation_config,
+                timeout=180,
+            )
+            return json.loads(_extract_json(retry_response.text))
+        except Exception as e:
+            raise RuntimeError(
+                f"Gemini JSON parse失敗(再試行も失敗): {e}\n"
+                f"original_response_head: {text[:300]}"
+            )
+
+
 def evaluate_from_transcript(transcript: str, staff_name: str, session_date,
                               customer_info: dict = None,
                               contract: str = "なし", course: str = "—", store: str = "") -> dict:
-    """文字起こしから評価 + FB を生成(音声不要)"""
+    """文字起こしから評価 + FB を生成(音声不要) + 二重チェック"""
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
+
+    # ── 文字起こしの品質チェック ──
+    transcript = (transcript or "").strip()
+    if len(transcript) < 50:
+        raise RuntimeError(
+            f"文字起こしが短すぎます({len(transcript)}文字)。"
+            f"録音内容を確認してください(無音 / 録音失敗の可能性)"
+        )
 
     leader_fb = fetch_leader_fb_examples()
     contract_status = "🎉 契約獲得" if contract == "あり" else "🥲 契約なし(失注)"
     course_label = course if (contract == "あり" and course not in ("", "—", None)) else "(未入会)"
 
-    # 既存のEVAL_PROMPT_TEMPLATEを流用、音声→文字起こしへの言い換え
     audio_prompt = EVAL_PROMPT_TEMPLATE.format(
         store=store or "(未指定)",
         staff_name=staff_name,
@@ -406,24 +514,35 @@ def evaluate_from_transcript(transcript: str, staff_name: str, session_date,
     text_prompt += f"\n\n【カウンセリング文字起こし】\n{transcript[:200000]}\n"
 
     model = genai.GenerativeModel("gemini-2.0-flash")
-    response = _gemini_call_with_retry(
-        model,
-        [text_prompt],
-        generation_config={
-            "temperature": 0.2,
-            "response_mime_type": "application/json",
-        },
-        timeout=600,
-    )
+    gen_config = {"temperature": 0.2, "response_mime_type": "application/json"}
 
-    text = response.text.strip()
-    m = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
-    if m:
-        text = m.group(1)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Gemini JSON parse失敗: {e}\nresponse: {text[:500]}")
+    # ── 第1試行 ──
+    response = _gemini_call_with_retry(model, [text_prompt], generation_config=gen_config, timeout=600)
+    result = _parse_with_retry(model, response, gen_config, text_prompt)
+
+    # ── バリデーション(必須フィールドチェック) ──
+    missing = _validate_result(result)
+    if missing:
+        # 第2試行: 不足フィールドを補完依頼
+        repair_prompt = text_prompt + (
+            f"\n\n【再生成依頼】前回のレスポンスで欠けていたフィールド: {missing}\n"
+            f"必ず全フィールドを含めて JSON を返してください。"
+        )
+        retry_response = _gemini_call_with_retry(model, [repair_prompt], generation_config=gen_config, timeout=600)
+        result = _parse_with_retry(model, retry_response, gen_config, repair_prompt)
+        # 2度目のバリデーション
+        missing_again = _validate_result(result)
+        if missing_again:
+            # フィールド不足でも処理は止めず、デフォルト値で補完
+            scores = result.get("scores", {})
+            for s in REQUIRED_SCORES:
+                scores.setdefault(s, 0)
+            result["scores"] = scores
+            result.setdefault("session_summary", "(評価生成エラー: 要約取得失敗)")
+            result.setdefault("good_points", "(評価生成エラー: 良かった点取得失敗)")
+            result.setdefault("improvements", "(評価生成エラー: 改善点取得失敗)")
+
+    return result
 
 
 # ── メイン Gemini Audio 呼び出し ──────────────────
@@ -468,41 +587,9 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
     )
 
     # ── ③ Gemini 呼び出し(音声 + プロンプト) - 429リトライ対応 ──
-    # gemini-2.0-flash: 無料枠 10 RPM (gemini-2.5-flash の倍)
     model = genai.GenerativeModel("gemini-2.0-flash")
-    last_error = None
-    response = None
-    for attempt in range(6):
-        try:
-            response = model.generate_content(
-                [uploaded, prompt],
-                generation_config={
-                    "temperature": 0.2,
-                    "response_mime_type": "application/json",
-                },
-                request_options={"timeout": 600},  # 10分タイムアウト
-            )
-            break
-        except Exception as e:
-            last_error = e
-            err_str = str(e)
-            # 429 quota error は自動リトライ(最大5回)
-            if "429" in err_str or "quota" in err_str.lower() or "ResourceExhausted" in err_str:
-                if attempt >= 5:
-                    raise RuntimeError(
-                        f"Gemini APIレート制限が続いています💦 数分後にもう一度試してね\n"
-                        f"継続するなら Google AI Studio で Tier 1 にアップグレード推奨(無料)\n"
-                        f"詳細: {err_str[:200]}"
-                    )
-                # retry_delay秒数を抽出(なければ70秒)
-                wait_match = re.search(r"retry[_\s]*delay[^\d]*(\d+)", err_str)
-                wait = int(wait_match.group(1)) + 10 if wait_match else 70
-                time.sleep(wait)
-                continue
-            # その他のエラーは即fail
-            raise
-    if response is None:
-        raise RuntimeError(f"Gemini呼び出し失敗: {last_error}")
+    gen_config = {"temperature": 0.2, "response_mime_type": "application/json"}
+    response = _gemini_call_with_retry(model, [uploaded, prompt], generation_config=gen_config, timeout=600)
 
     # ── ④ ファイル削除(個人情報保護: Gemini側にも残さない) ──
     try:
@@ -510,15 +597,34 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
     except Exception:
         pass
 
-    # ── ⑤ JSON パース ──
-    text = response.text.strip()
-    m = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
-    if m:
-        text = m.group(1)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Gemini JSON parse失敗: {e}\nresponse: {text[:500]}")
+    # ── ⑤ JSON パース + バリデーション(二重チェック) ──
+    result = _parse_with_retry(model, response, gen_config, prompt)
+
+    # 必須フィールド検証
+    missing = _validate_result(result)
+    if missing:
+        # 第2試行: 不足フィールドを補完依頼
+        repair_prompt = prompt + (
+            f"\n\n【再生成依頼】前回のレスポンスで欠けていたフィールド: {missing}\n"
+            f"必ず全フィールドを含めて JSON を返してください。"
+        )
+        retry_response = _gemini_call_with_retry(model, [repair_prompt], generation_config=gen_config, timeout=600)
+        result = _parse_with_retry(model, retry_response, gen_config, repair_prompt)
+        # それでも欠けてたらデフォルト補完
+        for s in REQUIRED_SCORES:
+            result.setdefault("scores", {}).setdefault(s, 0)
+        result.setdefault("session_summary", "(評価生成エラー: 要約取得失敗)")
+        result.setdefault("good_points", "(評価生成エラー: 良かった点取得失敗)")
+        result.setdefault("improvements", "(評価生成エラー: 改善点取得失敗)")
+
+    # 文字起こしの簡易検証(あれば50文字以上を期待)
+    transcript_check = (result.get("transcript") or "").strip()
+    if transcript_check and len(transcript_check) < 50:
+        result["_warnings"] = result.get("_warnings", []) + [
+            f"文字起こしが短い({len(transcript_check)}文字)。録音内容を確認してください"
+        ]
+
+    return result
 
 
 # ── 3. Slack通知 ──────────────────────────────────
@@ -751,21 +857,47 @@ def analyze_session(audio_file, staff_name: str, session_date,
     try:
         # ファイルサイズに応じて単一処理 or 分割並列処理を自動振り分け
         size_mb = os.path.getsize(tmp_path) / 1024 / 1024
+        processing_stats = {"size_mb": round(size_mb, 1), "mode": "", "chunks": 0, "failed_chunks": 0}
+
         if size_mb <= SINGLE_FILE_SIZE_LIMIT_MB:
             # 小〜中ファイル: 一発処理(文字起こし+評価を1リクエスト)
+            processing_stats["mode"] = "single"
             result = call_gemini_with_audio(tmp_path, staff_name, session_date,
                                             customer_info=customer_info,
                                             contract=contract, course=course, store=store)
         else:
             # 大ファイル: 分割並列文字起こし → 評価生成
             print(f"[Chunked] {size_mb:.1f}MB → {CHUNK_MINUTES}分ごとに分割、{MAX_PARALLEL_WORKERS}並列で処理")
-            transcript = transcribe_audio_parallel(tmp_path)
+            transcribe_result = transcribe_audio_parallel(tmp_path)
+            transcript = transcribe_result["transcript"]
+            processing_stats["mode"] = "chunked"
+            processing_stats["chunks"] = transcribe_result["stats"]["total_chunks"]
+            processing_stats["failed_chunks"] = transcribe_result["stats"]["failed_chunks"]
+            processing_stats["transcript_length"] = transcribe_result["stats"]["transcript_length"]
+
             result = evaluate_from_transcript(transcript, staff_name, session_date,
                                               customer_info=customer_info,
                                               contract=contract, course=course, store=store)
             # transcript フィールドを上書き(評価レスポンスより並列文字起こしの方が高精度)
             result["transcript"] = transcript
+            if transcribe_result["failed_chunks"]:
+                result["_warnings"] = result.get("_warnings", []) + [
+                    f"⚠ {len(transcribe_result['failed_chunks'])}件のチャンクで文字起こし失敗。"
+                    f"該当時間帯の評価精度が低下している可能性があります"
+                ]
 
+        # ── 最終バリデーション(処理が確実に完了したか確認) ──
+        final_missing = _validate_result(result)
+        if final_missing:
+            raise RuntimeError(f"最終バリデーション失敗。欠落フィールド: {final_missing}")
+
+        # 文字起こし最終チェック
+        final_transcript = (result.get("transcript") or "").strip()
+        if not final_transcript:
+            result["transcript"] = "(文字起こし取得失敗)"
+            result["_warnings"] = result.get("_warnings", []) + ["文字起こし全文が取得できませんでした"]
+
+        result["processing_stats"] = processing_stats
         # transcript は Gemini が JSON で返してくる(キー名は "transcript")
         result["contract"] = contract
         result["course"] = course
