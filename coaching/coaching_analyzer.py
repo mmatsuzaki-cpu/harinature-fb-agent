@@ -274,6 +274,38 @@ def _gemini_call_with_retry(model, contents, generation_config=None, timeout=600
     raise RuntimeError(f"Gemini呼び出し失敗: {last_error}")
 
 
+def compress_audio_if_large(audio_path: str, target_mb: float = 15.0) -> tuple:
+    """ファイルが大きすぎたら ffmpegでビットレート下げて再エンコード
+    - 32kbps モノラル AAC は人の声の文字起こしに十分(音楽用ではない)
+    - 60分音声 56MB → 約14MB に圧縮
+    返り値: (圧縮後パス, 元ファイル削除フラグ)
+    """
+    import subprocess
+    size_mb = os.path.getsize(audio_path) / 1024 / 1024
+    if size_mb <= target_mb:
+        return audio_path, False
+
+    output_path = f"{audio_path}.compressed.m4a"
+    try:
+        subprocess.run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", audio_path,
+            "-b:a", "32k",   # 音声ビットレート 32kbps
+            "-ac", "1",      # モノラル化
+            "-c:a", "aac",
+            output_path,
+        ], check=True, capture_output=True, timeout=180)
+        new_size = os.path.getsize(output_path) / 1024 / 1024
+        print(f"[Compress] {size_mb:.1f}MB → {new_size:.1f}MB (圧縮率 {(1-new_size/size_mb)*100:.0f}%)")
+        return output_path, True
+    except subprocess.TimeoutExpired:
+        print(f"[Compress] タイムアウト、元ファイル使用")
+        return audio_path, False
+    except subprocess.CalledProcessError as e:
+        print(f"[Compress] 失敗、元ファイル使用: {e}")
+        return audio_path, False
+
+
 def split_audio_to_chunks(audio_path: str, chunk_minutes: int = CHUNK_MINUTES) -> list:
     """音声ファイルを指定分数ごとのチャンクに分割
     ffmpeg を subprocess で直接呼ぶ(pydub不要、Python3.13対応)
@@ -861,21 +893,38 @@ def analyze_session(audio_file, staff_name: str, session_date,
         tmp.write(audio_file.read())
         tmp_path = tmp.name
 
+    compressed_path = None
     try:
+        # ── 自動圧縮: 大きいファイルは ffmpeg で 32kbps モノラルに ──
+        original_size_mb = os.path.getsize(tmp_path) / 1024 / 1024
+        processing_path, compressed = compress_audio_if_large(tmp_path, target_mb=SINGLE_FILE_SIZE_LIMIT_MB)
+        if compressed:
+            compressed_path = processing_path  # 後で削除
+            compressed_size_mb = os.path.getsize(processing_path) / 1024 / 1024
+        else:
+            compressed_size_mb = original_size_mb
+
         # ファイルサイズに応じて単一処理 or 分割並列処理を自動振り分け
-        size_mb = os.path.getsize(tmp_path) / 1024 / 1024
-        processing_stats = {"size_mb": round(size_mb, 1), "mode": "", "chunks": 0, "failed_chunks": 0}
+        size_mb = compressed_size_mb
+        processing_stats = {
+            "original_size_mb": round(original_size_mb, 1),
+            "size_mb": round(size_mb, 1),
+            "compressed": compressed,
+            "mode": "",
+            "chunks": 0,
+            "failed_chunks": 0,
+        }
 
         if size_mb <= SINGLE_FILE_SIZE_LIMIT_MB:
             # 小〜中ファイル: 一発処理(文字起こし+評価を1リクエスト)
             processing_stats["mode"] = "single"
-            result = call_gemini_with_audio(tmp_path, staff_name, session_date,
+            result = call_gemini_with_audio(processing_path, staff_name, session_date,
                                             customer_info=customer_info,
                                             contract=contract, course=course, store=store)
         else:
             # 大ファイル: 分割並列文字起こし → 評価生成
             print(f"[Chunked] {size_mb:.1f}MB → {CHUNK_MINUTES}分ごとに分割、{MAX_PARALLEL_WORKERS}並列で処理")
-            transcribe_result = transcribe_audio_parallel(tmp_path)
+            transcribe_result = transcribe_audio_parallel(processing_path)
             transcript = transcribe_result["transcript"]
             processing_stats["mode"] = "chunked"
             processing_stats["chunks"] = transcribe_result["stats"]["total_chunks"]
@@ -927,3 +976,9 @@ def analyze_session(audio_file, staff_name: str, session_date,
             os.unlink(tmp_path)
         except OSError:
             pass
+        # 圧縮版も削除
+        if compressed_path:
+            try:
+                os.unlink(compressed_path)
+            except OSError:
+                pass

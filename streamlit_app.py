@@ -693,7 +693,12 @@ def main():
         stats = result.get("processing_stats", {})
         if stats:
             mode_jp = "一発処理" if stats.get("mode") == "single" else "並列チャンク処理"
-            stat_line = f"📊 {stats.get('size_mb','?')}MB · {mode_jp}"
+            # 圧縮情報
+            if stats.get("compressed"):
+                size_line = f"{stats.get('original_size_mb','?')}MB → {stats.get('size_mb','?')}MB(自動圧縮)"
+            else:
+                size_line = f"{stats.get('size_mb','?')}MB"
+            stat_line = f"📊 {size_line} · {mode_jp}"
             if stats.get("mode") == "chunked":
                 ok = stats.get("chunks", 0) - stats.get("failed_chunks", 0)
                 stat_line += f" · チャンク {ok}/{stats.get('chunks',0)} 成功"
