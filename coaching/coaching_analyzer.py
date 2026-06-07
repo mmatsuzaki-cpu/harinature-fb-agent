@@ -532,9 +532,38 @@ def _validate_result(result: dict) -> list:
     return missing
 
 
+def _salvage_json(text: str) -> dict:
+    """壊れたJSON(ループ暴走でtranscriptが途中切れ等)から
+    必要フィールドを正規表現で救済抽出する最終手段"""
+    result = {}
+    # scores 抽出
+    sm = re.search(r'"scores"\s*:\s*\{([^}]*)\}', text)
+    if sm:
+        scores = {}
+        for k in REQUIRED_SCORES:
+            km = re.search(rf'"{k}"\s*:\s*(\d+)', sm.group(1))
+            if km:
+                scores[k] = int(km.group(1))
+        if scores:
+            result["scores"] = scores
+    # 各テキストフィールド抽出(最初の閉じない引用までを緩く)
+    for field in ["session_summary", "good_points", "improvements"]:
+        fm = re.search(rf'"{field}"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
+        if fm:
+            result[field] = fm.group(1).replace('\\n', '\n').replace('\\"', '"')
+    return result
+
+
 def _parse_with_retry(model, response, generation_config, original_prompt):
     """JSON パース失敗時に1回だけ再生成を試みる"""
-    text = _extract_json(response.text)
+    try:
+        text = _extract_json(response.text)
+    except Exception:
+        text = ""
+        if response.candidates and response.candidates[0].content.parts:
+            text = _extract_json("".join(
+                p.text for p in response.candidates[0].content.parts if hasattr(p, "text")
+            ))
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -550,9 +579,18 @@ def _parse_with_retry(model, response, generation_config, original_prompt):
                 timeout=180,
             )
             return json.loads(_extract_json(retry_response.text))
-        except Exception as e:
+        except Exception:
+            # 最終手段: 正規表現で必要フィールドを救済抽出
+            salvaged = _salvage_json(text)
+            if salvaged.get("scores") or salvaged.get("session_summary"):
+                salvaged.setdefault("_warnings", []).append(
+                    "JSON崩れのため一部フィールドを救済抽出しました"
+                ) if isinstance(salvaged.get("_warnings"), list) else salvaged.update(
+                    {"_warnings": ["JSON崩れのため一部フィールドを救済抽出しました"]}
+                )
+                return salvaged
             raise RuntimeError(
-                f"Gemini JSON parse失敗(再試行も失敗): {e}\n"
+                f"Gemini JSON parse失敗(救済も失敗)\n"
                 f"original_response_head: {text[:300]}"
             )
 
@@ -589,6 +627,14 @@ def evaluate_from_transcript(transcript: str, staff_name: str, session_date,
         "新人スタッフの新規カウンセリング文字起こしを評価します。"
     )
     text_prompt += f"\n\n【カウンセリング文字起こし】\n{transcript[:200000]}\n"
+    # ★重要: transcriptは既に取得済みなので再出力させない(ループ暴走防止)
+    text_prompt += (
+        '\n\n【最重要・厳守】\n'
+        '出力JSONに "transcript" フィールドは絶対に含めないでください。\n'
+        '同じ文を繰り返さないでください。各フィールドは簡潔に1回だけ書いてください。\n'
+        'customer_info / hearing_checklist / scores / session_summary / '
+        'good_points / improvements のみを出力してください。'
+    )
 
     model = genai.GenerativeModel("gemini-2.5-flash")
     gen_config = {"temperature": 0.2, "response_mime_type": "application/json", "max_output_tokens": 16000}
