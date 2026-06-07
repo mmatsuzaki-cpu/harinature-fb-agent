@@ -258,8 +258,7 @@ CUSTOM_CSS = """
     /* ───────────── 入力欄 ───────────── */
     .stTextInput input,
     .stTextArea textarea,
-    .stDateInput input,
-    .stSelectbox > div > div {
+    .stDateInput input {
         border-radius: 8px !important;
         border: 1px solid var(--border-strong) !important;
         padding: 0.7rem 0.9rem !important;
@@ -276,9 +275,39 @@ CUSTOM_CSS = """
         box-shadow: 0 0 0 3px rgba(122,149,96,0.12) !important;
         outline: none !important;
     }
-    /* Selectbox ホバー */
-    .stSelectbox > div > div:hover {
+
+    /* ───────────── Selectbox(全要素強制で文字色を効かせる) ───────────── */
+    .stSelectbox div[data-baseweb="select"] > div {
+        border-radius: 8px !important;
+        border: 1px solid var(--border-strong) !important;
+        background: var(--surface-0) !important;
+        font-family: 'Inter', 'Noto Sans JP', sans-serif !important;
+        font-size: 0.9rem !important;
+        transition: all 0.15s ease !important;
+    }
+    .stSelectbox div[data-baseweb="select"] > div:hover {
         border-color: var(--brand) !important;
+    }
+    /* 選択された値(★これが透明問題の核心) */
+    .stSelectbox div[data-baseweb="select"] *,
+    .stSelectbox div[data-baseweb="select"] span,
+    .stSelectbox div[data-baseweb="select"] [data-baseweb="tag"] {
+        color: var(--text-dark) !important;
+        -webkit-text-fill-color: var(--text-dark) !important;
+    }
+    /* ドロップダウンメニュー(開いたとき) */
+    div[data-baseweb="popover"] li,
+    div[data-baseweb="popover"] div,
+    ul[data-baseweb="menu"] li,
+    ul[data-baseweb="menu"] li * {
+        color: var(--text-dark) !important;
+        -webkit-text-fill-color: var(--text-dark) !important;
+        font-family: 'Inter', 'Noto Sans JP', sans-serif !important;
+        font-size: 0.9rem !important;
+    }
+    /* ホバー時の選択肢ハイライト */
+    ul[data-baseweb="menu"] li:hover {
+        background: rgba(122,149,96,0.08) !important;
     }
 
     /* ラベル */
