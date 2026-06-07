@@ -656,13 +656,14 @@ def main():
             mode_detail = f"{size_mb:.1f}MB → 通常処理(文字起こし+評価を1回で完結)"
         else:
             mode_label = "⚡️ 並列チャンク処理モード"
-            # チャンク数の推定: ファイルサイズ ≈ 1MB/分 (m4a 128kbps)
+            # 60分音声 ≈ 56MB → 6チャンク(10分ごと)
             est_chunks = max(2, int(size_mb / CHUNK_MINUTES) + 1)
-            est_low = max(1, est_chunks // MAX_PARALLEL_WORKERS + 1)
-            est_high = max(2, est_chunks // MAX_PARALLEL_WORKERS + 3)
+            # 並列度×平均処理1分 + 評価1分
+            est_low = max(2, (est_chunks // MAX_PARALLEL_WORKERS) + 1)
+            est_high = max(3, (est_chunks // MAX_PARALLEL_WORKERS) + 3)
             mode_detail = (
                 f"{size_mb:.1f}MB → {CHUNK_MINUTES}分ごとに約{est_chunks}チャンクへ分割、"
-                f"{MAX_PARALLEL_WORKERS}並列で文字起こし→評価生成"
+                f"{MAX_PARALLEL_WORKERS}並列+6秒間隔で文字起こし→評価生成"
             )
 
         spinner_msg = (

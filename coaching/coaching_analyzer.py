@@ -20,12 +20,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# 並列文字起こしの設定
-# Free Tier (10 RPM) に最適化: 並列度3 + 3秒スタッガで安全に消費
-# Tier 1 (1000 RPM) なら並列度を MAX_PARALLEL_WORKERS=8 に上げてもOK
-CHUNK_MINUTES = 5  # 1チャンクの長さ(分)
-MAX_PARALLEL_WORKERS = 3  # 同時並列リクエスト数(Free Tier安全側)
-CHUNK_STAGGER_SECONDS = 3  # チャンク投入の時間差(秒)
+# 並列文字起こしの設定(Free Tier 10 RPM 最適化版)
+# 60分音声(56MB)を確実に処理するための戦略:
+#   - 10分チャンク × 6個 = 6リクエスト/分 < 10件枠 ✓
+#   - 並列3 + 6秒スタッガで quota消費を平準化
+#   - 60分音声 → 約3〜4分で完了
+CHUNK_MINUTES = 10  # 1チャンクの長さ(分)
+MAX_PARALLEL_WORKERS = 3  # 同時並列リクエスト数
+CHUNK_STAGGER_SECONDS = 6  # チャンク投入の時間差(秒) = 60秒/10件
 SINGLE_FILE_SIZE_LIMIT_MB = 20  # この値以下は分割せず一発処理
 
 # 環境変数読み込み(Streamlit Cloud では st.secrets、ローカルでは .env)
@@ -265,7 +267,7 @@ def _gemini_call_with_retry(model, contents, generation_config=None, timeout=600
                         f"詳細: {err_str[:200]}"
                     )
                 wait_match = re.search(r"retry[_\s]*delay[^\d]*(\d+)", err_str)
-                wait = int(wait_match.group(1)) + 10 if wait_match else 70
+                wait = int(wait_match.group(1)) + 5 if wait_match else 65
                 time.sleep(wait)
                 continue
             raise
