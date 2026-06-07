@@ -271,19 +271,50 @@ def _gemini_call_with_retry(model, contents, generation_config=None, timeout=600
 
 def split_audio_to_chunks(audio_path: str, chunk_minutes: int = CHUNK_MINUTES) -> list:
     """音声ファイルを指定分数ごとのチャンクに分割
-    pydub + ffmpeg を使用(packages.txt で ffmpeg をインストール)
+    ffmpeg を subprocess で直接呼ぶ(pydub不要、Python3.13対応)
+    -c copy で再エンコードしないので超高速&メモリ消費小
     """
-    from pydub import AudioSegment
-    audio = AudioSegment.from_file(audio_path)
-    chunk_ms = chunk_minutes * 60 * 1000
+    import subprocess
+    # ① 全体長(秒)を ffprobe で取得
+    try:
+        duration_str = subprocess.check_output([
+            "ffprobe", "-v", "quiet",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            audio_path,
+        ], stderr=subprocess.STDOUT).decode().strip()
+        duration_sec = float(duration_str)
+    except (subprocess.CalledProcessError, ValueError) as e:
+        raise RuntimeError(f"音声の長さ取得失敗(ffprobe): {e}")
+
+    chunk_sec = chunk_minutes * 60
     chunks = []
     suffix = Path(audio_path).suffix.lstrip(".") or "m4a"
-    # pydub の export format は ffmpeg のフォーマット名
-    export_format = "ipod" if suffix in ("m4a", "mp4", "aac") else suffix
-    for i in range(0, len(audio), chunk_ms):
-        chunk = audio[i:i + chunk_ms]
-        chunk_path = f"{audio_path}.chunk_{i // chunk_ms:03d}.{suffix}"
-        chunk.export(chunk_path, format=export_format)
+
+    chunk_count = int(duration_sec // chunk_sec) + (1 if duration_sec % chunk_sec else 0)
+    for i in range(chunk_count):
+        start = i * chunk_sec
+        chunk_path = f"{audio_path}.chunk_{i:03d}.{suffix}"
+        # -c copy: 再エンコードなし(コーデックそのまま、瞬時に分割)
+        # -ss を -i の前に置くと高速シーク
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-ss", str(start),
+                "-i", audio_path,
+                "-t", str(chunk_sec),
+                "-c", "copy",
+                chunk_path,
+            ], check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            # -c copy が失敗した場合(m4a等で再エンコード必要)はフォールバック
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-ss", str(start),
+                "-i", audio_path,
+                "-t", str(chunk_sec),
+                chunk_path,
+            ], check=True, capture_output=True)
         chunks.append(chunk_path)
     return chunks
 
