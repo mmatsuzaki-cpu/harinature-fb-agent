@@ -227,7 +227,7 @@ def fetch_leader_fb_examples(n: int = 3) -> str:
         r = requests.post(
             f"https://api.notion.com/v1/databases/{NOTION_LEADER_FB_DB_ID.replace('-', '')}/query",
             headers=H,
-            json={"page_size": n, "sorts": [{"timestamp": "created_time", "direction": "descending"}]},
+            data=json.dumps({"page_size": n, "sorts": [{"timestamp": "created_time", "direction": "descending"}]}, ensure_ascii=False).encode("utf-8"),
         )
         examples = []
         for p in r.json().get("results", [])[:n]:
@@ -838,7 +838,7 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
 
     if SLACK_OWNER_USER_ID:
         dm_open = requests.post("https://slack.com/api/conversations.open",
-                                headers=H, json={"users": SLACK_OWNER_USER_ID}).json()
+                                headers=H, data=json.dumps({"users": SLACK_OWNER_USER_ID}, ensure_ascii=False).encode("utf-8")).json()
         if dm_open.get("ok"):
             dm_id = dm_open["channel"]["id"]
             requests.post("https://slack.com/api/chat.postMessage", headers=H,
@@ -1046,13 +1046,27 @@ def analyze_session(audio_file, staff_name: str, session_date,
         result["questions"] = questions
         result["customer_info"] = customer_info or {}
 
-        slack_meta = send_slack_notifications(staff_name, session_date, result) or {}
-        result["slack_ts"] = slack_meta.get("ts", "")
-        result["slack_permalink"] = slack_meta.get("permalink", "")
+        # ── Slack送信(失敗してもFB結果は返す: どこで落ちたか切り分け) ──
+        try:
+            slack_meta = send_slack_notifications(staff_name, session_date, result) or {}
+            result["slack_ts"] = slack_meta.get("ts", "")
+            result["slack_permalink"] = slack_meta.get("permalink", "")
+        except Exception as e:
+            result["_warnings"] = result.get("_warnings", []) + [
+                f"⚠ [Slack送信エラー] {type(e).__name__}: {str(e)[:150]}"
+            ]
+            result["slack_ts"] = ""
+            result["slack_permalink"] = ""
 
-        notion_url = save_to_notion(staff_name, session_date, result)
-        if notion_url:
-            result["notion_url"] = notion_url
+        # ── Notion保存(失敗してもFB結果は返す) ──
+        try:
+            notion_url = save_to_notion(staff_name, session_date, result)
+            if notion_url:
+                result["notion_url"] = notion_url
+        except Exception as e:
+            result["_warnings"] = result.get("_warnings", []) + [
+                f"⚠ [Notion保存エラー] {type(e).__name__}: {str(e)[:150]}"
+            ]
 
         return result
     finally:

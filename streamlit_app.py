@@ -522,7 +522,7 @@ def render_topbar():
         </div>
         <div class="topbar-meta">
             <span class="status-badge">Online</span>
-            <span class="version-tag">v1.2.0</span>
+            <span class="version-tag">v2.0.0</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
