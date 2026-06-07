@@ -361,24 +361,6 @@ def main():
         course = "—"
 
     with st.form("upload_form"):
-        st.markdown('<div class="section-title">CUSTOMER INFORMATION</div>', unsafe_allow_html=True)
-        col_a, col_b = st.columns(2)
-        with col_a:
-            age = st.selectbox(
-                "年齢",
-                ["—", "10代", "20代", "30代", "40代", "50代", "60代", "70代以上"],
-                index=0,
-            )
-        with col_b:
-            job = st.text_input("仕事内容", placeholder="例: 看護師(夜勤あり)")
-
-        concerns = st.text_area(
-            "悩み",
-            placeholder="例: 顔のむくみ、肌のたるみ、目の下のクマ",
-            height=80,
-        )
-        history = st.text_input("既往歴", placeholder="例: なし / アトピー / 妊娠中 等")
-
         st.markdown('<div class="section-title">AUDIO FILE</div>', unsafe_allow_html=True)
         audio_file = st.file_uploader(
             "録音ファイル",
@@ -402,26 +384,14 @@ def main():
         errors = []
         if not staff_name:
             errors.append("ハリザーブの名前")
-        if age == "—":
-            errors.append("年齢")
-        if not job.strip():
-            errors.append("仕事内容")
-        if not concerns.strip():
-            errors.append("悩み")
-        if not history.strip():
-            errors.append("既往歴")
         if not audio_file:
             errors.append("録音ファイル")
         if errors:
             st.error(f"⚠️ 未入力: {', '.join(errors)} を入力してね💦")
             return
 
-        customer_info = {
-            "age": age,
-            "job": job.strip(),
-            "concerns": concerns.strip(),
-            "history": history.strip(),
-        }
+        # お客様情報は AI が音声から自動抽出するので入力不要
+        customer_info = {}
         from coaching.coaching_analyzer import analyze_session
         # ファイルサイズに応じた予測時間(Gemini Audio用)
         size_mb = audio_file.size / 1024 / 1024
@@ -459,6 +429,23 @@ def main():
         with col_b: st.metric("PROPOSAL", f"{scores.get('proposal', 0)} / 5")
         with col_c: st.metric("CLOSING",  f"{scores.get('closing', 0)} / 5")
         with col_d: st.metric("TONE",     f"{scores.get('tone', 0)} / 5")
+
+        # ── ヒアリングチェックリスト表示 ──
+        checklist = result.get("hearing_checklist", {}) or {}
+        if checklist:
+            achieved = sum(1 for v in checklist.values() if v)
+            total = len(checklist)
+            st.markdown(
+                f'<div class="section-title">HEARING CHECKLIST  ({achieved}/{total})</div>',
+                unsafe_allow_html=True,
+            )
+            # 3列でグリッド表示
+            check_items = list(checklist.items())
+            cols = st.columns(3)
+            for i, (item, ok) in enumerate(check_items):
+                with cols[i % 3]:
+                    mark = "✅" if ok else "❌"
+                    st.markdown(f"{mark} {item}")
 
         st.markdown('<div class="section-title">STRENGTHS</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="result-card good">{result.get("good_points", "(なし)")}</div>', unsafe_allow_html=True)

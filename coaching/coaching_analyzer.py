@@ -49,11 +49,7 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 【契約結果】 {contract_status}
 【コース】 {course_label}
 
-【お客様情報】
-- 年齢: {customer_age}
-- 仕事: {customer_job}
-- 悩み: {customer_concerns}
-- 既往歴: {customer_history}
+※ お客様情報(年齢/仕事/悩み/既往歴)は録音から自動で読み取って評価に活かしてください
 
 【参考にするリーダーFB事例集(過去類似ケース)】
 {leader_fb_examples}
@@ -108,9 +104,36 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 3. 「ハリナチュレじゃなくてもいいので、何かしら始めた方がいい」と伝える
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【ハリナチュレ 新規ヒアリング必須14項目】※ ヒアリング軸の評価基準
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+下記14項目を「聞けたか/触れたか」をチェックし、各項目を true/false で判定する。
+ヒアリング★スコアは このチェック達成数 + 深掘りの質 で決定する。
+
+1. 悩みトップ3_深掘り: お客様の悩みを3つ以上引き出し、原因まで深掘りしたか
+2. 仕事: 職業・働き方・勤務時間など
+3. 食事: 普段の食生活・偏り・自炊外食
+4. アルコール: 飲酒頻度・量
+5. 水分: 1日の水分摂取量
+6. 睡眠: 睡眠時間・質・寝つき
+7. 運動: 運動習慣の有無・頻度
+8. 歩数: 1日の歩数・日常の活動量
+9. 体重増減: 最近の体重変化・産後変化
+10. お風呂: 入浴習慣(湯船 or シャワーのみ)
+11. 既往歴: 既往症・体質・服薬
+12. セルフケア: スキンケア・マッサージなど自宅ケア
+13. 美容医療: 美容医療経験・他サロン併用状況
+14. プランニング: お客様の目標・3ヶ月/半年/1年後の理想像をヒアリングし、その達成に向けて鍼サロンとしてどう寄り添うかを一緒に組み立てたか
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 【評価項目(各1〜5の★スコア)】
-1. ヒアリング: 7つの感の中の「親近感・安心感」+ お悩み深掘り(悩み+目的+原因まで聞けているか)、体の状態理解
+1. ヒアリング: 【上記14項目チェック達成数】+ 7つの感(親近感・安心感)+ 悩み深掘り(悩み+目的+原因)、体の状態理解
+   - 14項目中 12-14個達成 → ★5
+   - 9-11個達成 → ★4
+   - 6-8個達成 → ★3
+   - 3-5個達成 → ★2
+   - 0-2個達成 → ★1
 2. 提案: 美容鍼・経絡ケア・お肌診断の価値訴求、危機感トーク(放置した未来を伝える)、「ハリナチュレじゃなくてもいい」フレーズ、3ヶ月提案
 3. クロージング: 「3ヶ月だけ任せてもらえませんか」スクリプト、入会金無料の伝え方(最後にお得情報として)、契約決断サポート
 4. トーン: 寄り添い方、話し方、聞きやすさ、鍼への不安への配慮
@@ -120,6 +143,7 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 - 契約「なし」の場合 → 「失注分析視点」(7つの感のどれが弱かったか/危機感トークの不足/「他でもいい」フレーズの欠如/3ヶ月提案の言い切り不足/入会金無料の伝え方タイミング)
 
 【FB生成時の必須チェック】
+- ヒアリング14項目のうち「聞けてなかった項目」を必ず明示し、次回ヒアリングで聞くよう促す
 - 「7つの感」のどれが弱かったかを必ず1つ以上指摘
 - 危機感トーク・3ヶ月提案・入会金無料トークが入っていたか言及
 - 「ハリナチュレじゃなくてもいい」フレーズが入っていたか確認
@@ -134,10 +158,32 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 【出力形式(JSON厳守)】
 {{
   "transcript": "<音声全体を日本語で正確に文字起こし(発話者の区別不要・段落分け推奨)>",
+  "customer_info": {{
+    "age": "<音声から推定したお客様の年齢層 (10代/20代/30代/40代/50代/60代/70代以上/不明)>",
+    "job": "<音声から聞き取ったお客様の仕事内容(分からなければ「不明」)>",
+    "concerns": "<お客様が話していた悩み・主訴を箇条書き>",
+    "history": "<お客様が話していた既往歴・体質(なければ「特記なし」)>"
+  }},
+  "hearing_checklist": {{
+    "悩みトップ3_深掘り": <true|false>,
+    "仕事": <true|false>,
+    "食事": <true|false>,
+    "アルコール": <true|false>,
+    "水分": <true|false>,
+    "睡眠": <true|false>,
+    "運動": <true|false>,
+    "歩数": <true|false>,
+    "体重増減": <true|false>,
+    "お風呂": <true|false>,
+    "既往歴": <true|false>,
+    "セルフケア": <true|false>,
+    "美容医療": <true|false>,
+    "プランニング": <true|false>
+  }},
   "scores": {{"hearing": <int>, "proposal": <int>, "closing": <int>, "tone": <int>}},
   "session_summary": "<カウンセリング録音の要約(お客様の年齢/職業/主訴/提案内容/お客様の反応の流れを箇条書きで200〜400字程度・マークダウン)>",
   "good_points": "<良かったポイントを具体的に3つ箇条書き(マークダウン)。7つの感のどれが機能していたか言及>",
-  "improvements": "<改善点を具体的に2つ箇条書き(マークダウン)。7つの感・危機感トーク・3ヶ月提案・入会金無料・「他でもいい」フレーズのどれが不足していたかを必ず指摘し、松崎の上記スクリプトを引用しながらパーソナライズした改善案を提示>"
+  "improvements": "<改善点を具体的に2つ箇条書き(マークダウン)。聞けなかったヒアリング項目を必ず先頭に列挙し、次回どう聞くかを具体例で示す。続けて7つの感・危機感トーク・3ヶ月提案・入会金無料・「他でもいい」フレーズのどれが不足していたかを必ず指摘し、松崎の上記スクリプトを引用しながらパーソナライズした改善案を提示>"
 }}
 
 JSONのみ出力。コメントや説明は不要。
@@ -209,10 +255,6 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
         session_date=session_date,
         contract_status=contract_status,
         course_label=course_label,
-        customer_age=customer_info.get("age", "(未入力)"),
-        customer_job=customer_info.get("job", "(未入力)"),
-        customer_concerns=customer_info.get("concerns", "(未入力)"),
-        customer_history=customer_info.get("history", "(未入力)"),
         leader_fb_examples=leader_fb,
     )
 
@@ -299,6 +341,25 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
 
     session_summary = result.get("session_summary", "(要約なし)")
 
+    # ── ヒアリングチェックリスト整形 ──
+    checklist = result.get("hearing_checklist", {}) or {}
+    checklist_lines = []
+    achieved = 0
+    total = 0
+    for item, ok in checklist.items():
+        mark = "✅" if ok else "❌"
+        checklist_lines.append(f"{mark} {item}")
+        total += 1
+        if ok:
+            achieved += 1
+    checklist_block = ""
+    if checklist_lines:
+        checklist_block = (
+            f"\n\n━━━━━━━━━━━━━━\n"
+            f"🔍 *ヒアリング項目チェック*  ({achieved}/{total}項目)\n"
+            + "  ".join(checklist_lines)
+        )
+
     store = result.get("store", "")
     store_line = f"🏠 {store}店  " if store else ""
     questions = (result.get("questions") or "").strip()
@@ -316,7 +377,9 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
         f"{session_summary}\n\n"
         f"━━━━━━━━━━━━━━\n"
         f"📊 *評価*  平均★{avg:.1f}/5\n"
-        f"{star_line}\n\n"
+        f"{star_line}"
+        f"{checklist_block}\n\n"
+        f"━━━━━━━━━━━━━━\n"
         f"☘️ *良かった点*\n{result.get('good_points', '')}\n\n"
         f"🍃 *改善点*\n{result.get('improvements', '')}"
         f"{questions_block}"
@@ -394,6 +457,15 @@ def save_to_notion(staff_name: str, session_date, result: dict) -> str:
     slack_ts = result.get("slack_ts", "")
     slack_permalink = result.get("slack_permalink", "")
 
+    # ヒアリングチェックリストをテキスト化
+    checklist = result.get("hearing_checklist", {}) or {}
+    checklist_lines = [f"{'✅' if v else '❌'} {k}" for k, v in checklist.items()]
+    hearing_achieved = sum(1 for v in checklist.values() if v)
+    hearing_total = len(checklist) if checklist else 0
+    checklist_text = ""
+    if checklist_lines:
+        checklist_text = f"達成: {hearing_achieved}/{hearing_total}\n" + "\n".join(checklist_lines)
+
     if hasattr(session_date, "isoformat"):
         date_str = session_date.isoformat()
     else:
@@ -416,6 +488,8 @@ def save_to_notion(staff_name: str, session_date, result: dict) -> str:
         "疑問点": {"rich_text": _rich_text(questions)},
         "文字起こし全文": {"rich_text": _rich_text(transcript)},
         "Slack ts": {"rich_text": _rich_text(slack_ts)},
+        "ヒアリング達成数": {"number": hearing_achieved},
+        "ヒアリングチェック": {"rich_text": _rich_text(checklist_text)},
     }
     if slack_permalink:
         properties["Slackスレッド"] = {"url": slack_permalink}
