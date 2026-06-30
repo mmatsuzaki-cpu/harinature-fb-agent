@@ -256,13 +256,18 @@ def _strip_loops(text: str) -> str:
     if not text:
         return text
     # 句点・改行で分割して、直前と同じ文が3回以上続いたら以降カット
+    # 空白/改行のみのパートは prev を変えずそのまま保持
+    # (改行区切りの繰り返しを取りこぼさないため)
     parts = re.split(r'(?<=[。\n])', text)
     cleaned = []
     prev = None
     repeat = 0
     for p in parts:
         ps = p.strip()
-        if ps and ps == prev:
+        if not ps:
+            cleaned.append(p)
+            continue
+        if ps == prev:
             repeat += 1
             if repeat >= 2:  # 同じ文が3回目以降はスキップ
                 continue
@@ -328,7 +333,8 @@ def compress_audio_if_large(audio_path: str, target_mb: float = 15.0) -> tuple:
     except subprocess.TimeoutExpired:
         print(f"[Compress] タイムアウト、元ファイル使用")
         return audio_path, False
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        # FileNotFoundError = ffmpeg未インストール(packages.txtで導入されるはず)
         print(f"[Compress] 失敗、元ファイル使用: {e}")
         return audio_path, False
 
@@ -348,6 +354,11 @@ def split_audio_to_chunks(audio_path: str, chunk_minutes: int = CHUNK_MINUTES) -
             audio_path,
         ], stderr=subprocess.STDOUT).decode().strip()
         duration_sec = float(duration_str)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg/ffprobe が見つかりません。Streamlit Cloud では packages.txt に "
+            "'ffmpeg' を追加してください(ローカルは brew install ffmpeg)"
+        )
     except (subprocess.CalledProcessError, ValueError) as e:
         raise RuntimeError(f"音声の長さ取得失敗(ffprobe): {e}")
 
@@ -752,6 +763,40 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
 
 # ── 3. Slack通知 ──────────────────────────────────
 
+def _slack_api(api_method: str, payload: dict = None, method: str = "post", params: dict = None) -> dict:
+    """Slack Web API 共通ラッパー
+    - 日本語を含む body は ensure_ascii=False + utf-8 エンコードで送る
+      (latin-1 エンコードエラー回避)
+    - method="get" のときは params をクエリで送る
+    返り値: Slack API の JSON レスポンス(dict)
+    """
+    import requests
+    url = f"https://slack.com/api/{api_method}"
+    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
+    if method == "get":
+        r = requests.get(url, headers=headers, params=params or {}, timeout=30)
+    else:
+        headers["Content-Type"] = "application/json; charset=utf-8"
+        body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+        r = requests.post(url, headers=headers, data=body, timeout=30)
+    return r.json()
+
+
+def _fmt_fb_text(text: str) -> str:
+    """Gemini出力のマークダウンを Slack mrkdwn 向けに整形
+    - 見出し記号(#, ##)を除去
+    - **太字** → *太字*(Slack mrkdwn)
+    - 行頭の箇条書き `- ` / `* ` を `• ` に統一
+    """
+    if not text:
+        return ""
+    s = str(text).strip()
+    s = re.sub(r'^\s{0,3}#{1,6}\s*', '', s, flags=re.MULTILINE)   # 見出し除去
+    s = re.sub(r'\*\*(.+?)\*\*', r'*\1*', s)                       # 太字記法変換
+    s = re.sub(r'^\s*[-*]\s+', '• ', s, flags=re.MULTILINE)        # 箇条書き統一
+    return s.strip()
+
+
 def send_slack_notifications(staff_name: str, session_date, result: dict) -> dict:
     """Slack に通知:
     ① #ハリナチュレ_新規振り返り チャンネル投稿(全員見れる)
@@ -759,91 +804,99 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
     返り値: {"ts": "1234567890.123456", "permalink": "https://..."}
             (リーダーFB同期スクリプトが後でスレッド返信を引っ張ってくる用)
     """
-    import requests
     if not SLACK_BOT_TOKEN:
         return {}
-    H = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-Type": "application/json; charset=utf-8"}
 
     scores = result.get("scores", {})
     avg = sum(scores.values()) / max(len(scores), 1)
-    star_line = f"ヒアリング★{scores.get('hearing',0)} / 提案★{scores.get('proposal',0)} / クロージング★{scores.get('closing',0)} / トーン★{scores.get('tone',0)}"
+    star_line = f"ヒアリング ★{scores.get('hearing',0)}　／　提案 ★{scores.get('proposal',0)}　／　クロージング ★{scores.get('closing',0)}　／　トーン ★{scores.get('tone',0)}"
 
     contract = result.get("contract", "なし")
     course = result.get("course", "—")
     if contract == "あり" and course not in ("", "—", None):
-        contract_line = f"🎉 *契約獲得* ({course})"
+        contract_line = f"🎉 *契約獲得*（{course}）"
     elif contract == "あり":
         contract_line = "🎉 *契約獲得*"
     else:
-        contract_line = "🥲 契約なし"
+        contract_line = "🥲 *契約なし*"
 
-    session_summary = result.get("session_summary", "(要約なし)")
+    session_summary = _fmt_fb_text(result.get("session_summary", "(要約なし)"))
+    good_points = _fmt_fb_text(result.get("good_points", ""))
+    improvements = _fmt_fb_text(result.get("improvements", ""))
 
-    # ── ヒアリングチェックリスト整形 ──
+    # ── ヒアリングチェックリスト整形(縦並びで見やすく) ──
     checklist = result.get("hearing_checklist", {}) or {}
-    checklist_lines = []
-    achieved = 0
-    total = 0
-    for item, ok in checklist.items():
-        mark = "✅" if ok else "❌"
-        checklist_lines.append(f"{mark} {item}")
-        total += 1
-        if ok:
-            achieved += 1
+    achieved = sum(1 for v in checklist.values() if v)
+    total = len(checklist)
     checklist_block = ""
-    if checklist_lines:
+    if checklist:
+        lines = [f"{'✅' if ok else '⬜️'} {item}" for item, ok in checklist.items()]
         checklist_block = (
             f"\n\n━━━━━━━━━━━━━━\n"
-            f"🔍 *ヒアリング項目チェック*  ({achieved}/{total}項目)\n"
-            + "  ".join(checklist_lines)
+            f"🔍 *ヒアリング項目*　{achieved}/{total} 項目クリア\n\n"
+            + "\n".join(lines)
         )
 
     store = result.get("store", "")
-    store_line = f"🏠 {store}店  " if store else ""
+    store_line = f"🏠 {store}店　" if store else ""
     questions = (result.get("questions") or "").strip()
     questions_block = (
         f"\n\n━━━━━━━━━━━━━━\n"
-        f"❓ *リーダー/研修担当への疑問点*\n{questions}"
+        f"❓ *リーダーへの質問*\n{questions}"
         if questions else ""
     )
+    # スマホで読みやすいよう各セクションを空行で区切る
     channel_msg = (
         f"🪡 *新規カウンセリング振り返り*\n"
-        f"{store_line}👤 {staff_name} さん  📅 {session_date}\n"
-        f"{contract_line}\n\n"
+        f"{store_line}👤 {staff_name} さん\n"
+        f"📅 {session_date}　{contract_line}\n\n"
         f"━━━━━━━━━━━━━━\n"
-        f"🌿 *振り返り内容*\n"
-        f"{session_summary}\n\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"📊 *評価*  平均★{avg:.1f}/5\n"
+        f"📊 *総合評価*　平均 ★{avg:.1f} / 5\n\n"
         f"{star_line}"
         f"{checklist_block}\n\n"
         f"━━━━━━━━━━━━━━\n"
-        f"☘️ *良かった点*\n{result.get('good_points', '')}\n\n"
-        f"🍃 *改善点*\n{result.get('improvements', '')}"
+        f"🌿 *振り返りサマリー*\n\n"
+        f"{session_summary}\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"☘️ *よかった点*\n\n"
+        f"{good_points}\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🍃 *次に伸ばすポイント*\n\n"
+        f"{improvements}"
         f"{questions_block}"
     )
-    post_res = requests.post(
-        "https://slack.com/api/chat.postMessage", headers=H,
-        data=json.dumps({"channel": SLACK_FEEDBACK_CHANNEL_ID, "text": channel_msg}, ensure_ascii=False).encode("utf-8"),
-    ).json()
-    ts = post_res.get("ts", "")
-    permalink = ""
-    if ts:
-        pl_res = requests.get(
-            "https://slack.com/api/chat.getPermalink",
-            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-            params={"channel": SLACK_FEEDBACK_CHANNEL_ID, "message_ts": ts},
-        ).json()
-        permalink = pl_res.get("permalink", "")
 
+    ts = ""
+    permalink = ""
+    # ① チャンネル投稿(各呼び出しを独立させ1つ失敗しても継続)
+    try:
+        post_res = _slack_api("chat.postMessage",
+                              {"channel": SLACK_FEEDBACK_CHANNEL_ID, "text": channel_msg})
+        ts = post_res.get("ts", "")
+    except Exception as e:
+        print(f"[Slack postMessage] {e}")
+
+    # ② permalink取得(任意)
+    if ts:
+        try:
+            pl = _slack_api("chat.getPermalink", None, method="get",
+                            params={"channel": SLACK_FEEDBACK_CHANNEL_ID, "message_ts": ts})
+            permalink = pl.get("permalink", "")
+        except Exception as e:
+            print(f"[Slack getPermalink] {e}")
+
+    # ③ 松崎さん完了DM(任意)
     if SLACK_OWNER_USER_ID:
-        dm_open = requests.post("https://slack.com/api/conversations.open",
-                                headers=H, data=json.dumps({"users": SLACK_OWNER_USER_ID}, ensure_ascii=False).encode("utf-8")).json()
-        if dm_open.get("ok"):
-            dm_id = dm_open["channel"]["id"]
-            requests.post("https://slack.com/api/chat.postMessage", headers=H,
-                          data=json.dumps({"channel": dm_id,
-                                "text": f"✅ *ハリナチュレ育成FB処理完了*\n{staff_name} さん({session_date})の評価が #ハリナチュレ_新規振り返り に投稿されました🪡"}, ensure_ascii=False).encode("utf-8"))
+        try:
+            dm_open = _slack_api("conversations.open", {"users": SLACK_OWNER_USER_ID})
+            if dm_open.get("ok"):
+                dm_id = dm_open["channel"]["id"]
+                _slack_api("chat.postMessage", {
+                    "channel": dm_id,
+                    "text": f"✅ *ハリナチュレ育成FB処理完了*\n{staff_name} さん（{session_date}）の評価が #ハリナチュレ_新規振り返り に投稿されました🪡",
+                })
+        except Exception as e:
+            print(f"[Slack DM] {e}")
 
     return {"ts": ts, "permalink": permalink}
 
@@ -851,10 +904,24 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
 # ── 4. Notion 蓄積 ────────────────────────────────
 
 def _rich_text(content: str, max_len: int = 2000) -> list:
-    """Notion rich_text 形式に変換(2000文字制限あり)"""
+    """Notion rich_text 形式に変換(1要素2000文字制限あり)"""
     if not content:
         return []
     return [{"type": "text", "text": {"content": str(content)[:max_len]}}]
+
+
+def _rich_text_long(content: str, max_total: int = 120000) -> list:
+    """長文を 2000文字ずつ複数の rich_text 要素に分割(文字起こし全文用)
+    Notion は1テキスト要素2000字までだが、配列に複数入れれば全文保存できる。
+    max_total で安全上限(約120,000字 ≒ 2時間分)を設ける。
+    """
+    if not content:
+        return []
+    s = str(content)[:max_total]
+    return [
+        {"type": "text", "text": {"content": s[i:i + 2000]}}
+        for i in range(0, len(s), 2000)
+    ]
 
 
 def save_to_notion(staff_name: str, session_date, result: dict) -> str:
@@ -878,11 +945,17 @@ def save_to_notion(staff_name: str, session_date, result: dict) -> str:
     tone = int(scores.get("tone", 0))
     avg = round((hearing + proposal + closing + tone) / 4, 2) if any([hearing, proposal, closing, tone]) else 0
 
+    def _as_text(v):
+        # Gemini が concerns 等を配列で返すことがあるので文字列に正規化
+        if isinstance(v, (list, tuple)):
+            return "、".join(str(x) for x in v if str(x).strip())
+        return str(v) if v is not None else ""
+
     customer_info = result.get("customer_info") or {}
-    age = customer_info.get("age", "—")
-    job = customer_info.get("job", "")
-    concerns = customer_info.get("concerns", "")
-    history = customer_info.get("history", "")
+    age = _as_text(customer_info.get("age", "—")) or "—"
+    job = _as_text(customer_info.get("job", ""))
+    concerns = _as_text(customer_info.get("concerns", ""))
+    history = _as_text(customer_info.get("history", ""))
 
     contract = result.get("contract", "なし")
     course = result.get("course", "—") or "—"
@@ -924,7 +997,7 @@ def save_to_notion(staff_name: str, session_date, result: dict) -> str:
         "良かった点": {"rich_text": _rich_text(good_points)},
         "改善点": {"rich_text": _rich_text(improvements)},
         "疑問点": {"rich_text": _rich_text(questions)},
-        "文字起こし全文": {"rich_text": _rich_text(transcript)},
+        "文字起こし全文": {"rich_text": _rich_text_long(transcript)},
         "Slack ts": {"rich_text": _rich_text(slack_ts)},
         "ヒアリング達成数": {"number": hearing_achieved},
         "ヒアリングチェック": {"rich_text": _rich_text(checklist_text)},
@@ -1044,7 +1117,12 @@ def analyze_session(audio_file, staff_name: str, session_date,
         result["course"] = course
         result["store"] = store
         result["questions"] = questions
-        result["customer_info"] = customer_info or {}
+        # customer_info: フォーム入力があればそれを優先、
+        # 空(ハリナチュレは録音から自動抽出)なら Gemini 抽出結果を保持
+        if customer_info:
+            result["customer_info"] = customer_info
+        else:
+            result["customer_info"] = result.get("customer_info") or {}
 
         # ── Slack送信(失敗してもFB結果は返す: どこで落ちたか切り分け) ──
         try:

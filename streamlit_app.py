@@ -548,7 +548,7 @@ def render_footer():
     <div class="app-footer">
         <div class="footer-brand">HARI ✦ NATURE</div>
         <div class="footer-tech">
-            <span>⚡ Powered by Gemini 2.0 Flash</span>
+            <span>⚡ Powered by Gemini 2.5 Flash</span>
             <span>🔒 Data is processed securely</span>
             <span>© 2026 HARI NATURE</span>
         </div>
@@ -663,7 +663,7 @@ def main():
             est_high = max(3, (est_chunks // MAX_PARALLEL_WORKERS) + 3)
             mode_detail = (
                 f"{size_mb:.1f}MB → {CHUNK_MINUTES}分ごとに約{est_chunks}チャンクへ分割、"
-                f"{MAX_PARALLEL_WORKERS}並列+6秒間隔で文字起こし→評価生成"
+                f"{MAX_PARALLEL_WORKERS}並列で文字起こし→評価生成"
             )
 
         spinner_msg = (
@@ -717,10 +717,10 @@ def main():
         st.markdown('<div class="section-title">Evaluation Scores</div>', unsafe_allow_html=True)
         scores = result.get("scores", {})
         col_a, col_b, col_c, col_d = st.columns(4)
-        with col_a: st.metric("HEARING",  f"{scores.get('hearing', 0)} / 5")
-        with col_b: st.metric("PROPOSAL", f"{scores.get('proposal', 0)} / 5")
-        with col_c: st.metric("CLOSING",  f"{scores.get('closing', 0)} / 5")
-        with col_d: st.metric("TONE",     f"{scores.get('tone', 0)} / 5")
+        with col_a: st.metric("ヒアリング",   f"{scores.get('hearing', 0)} / 5")
+        with col_b: st.metric("提案",         f"{scores.get('proposal', 0)} / 5")
+        with col_c: st.metric("クロージング", f"{scores.get('closing', 0)} / 5")
+        with col_d: st.metric("トーン",       f"{scores.get('tone', 0)} / 5")
 
         # ── ヒアリングチェックリスト表示(ピル型バッジ) ──
         checklist = result.get("hearing_checklist", {}) or {}
