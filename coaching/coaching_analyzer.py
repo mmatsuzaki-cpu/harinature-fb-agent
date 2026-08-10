@@ -65,8 +65,13 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 
 ※ お客様情報(年齢/仕事/悩み/既往歴)は録音から自動で読み取って評価に活かしてください
 
-【参考にするリーダーFB事例集(過去類似ケース)】
+【松崎(リーダー)の過去FB事例集】
 {leader_fb_examples}
+
+※ 事例の使い方(重要):
+- 上記から「今回のお客様の悩み・状況・契約結果」に近い事例だけを自分で選んで参考にする(関係ない事例は無視してよい)
+- 参考にした事例の「松崎FBの着眼点・言い回し」を improvements のアドバイスに反映する
+- 事例の内容をそのままコピーせず、今回のお客様の状況に合わせて言い換える
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【ハリナチュレの新規対応哲学(評価軸の基礎)】
@@ -164,11 +169,19 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 - 契約「なし」の場合 → 「失注分析視点」(7つの感のどれが弱かったか/危機感トークの不足/「他でもいい」フレーズの欠如/3ヶ月提案の言い切り不足/入会金無料の伝え方タイミング)
 
 【FB生成時の必須チェック】
-- ヒアリング14項目のうち「聞けてなかった項目」を必ず明示し、次回ヒアリングで聞くよう促す
+- ヒアリング16項目のうち「聞けてなかった項目」を必ず明示し、次回ヒアリングで聞くよう促す
 - 「7つの感」のどれが弱かったかを必ず1つ以上指摘
 - 危機感トーク・3ヶ月提案・入会金無料トークが入っていたか言及
 - 「ハリナチュレじゃなくてもいい」フレーズが入っていたか確認
 - 改善提案は上記スクリプトをベースに、お客様の状況に合わせてパーソナライズ
+
+【FBの書き方ルール(質の担保・厳守)】
+1. 発言引用: good_points は各項目を『実際の発言の引用「 」→なぜ良いか』の順で書く(最低1項目は必ず発言引用を含める。引用できる発言が全く無い場合のみ省略可)。
+   improvements には実際の発言を1〜3個「 」で引用し、必ず次のビフォー→アフター形式で書き換え例を示す:
+   ▼実際の発言:「(録音からそのまま引用)」
+   ▼こう言い換える:「(松崎メソッドに沿った具体的なセリフ例)」
+2. 引用の正確性: 引用は文字起こしに実在する発言のみ。該当場面が存在しない指摘には引用を付けず「(該当する場面なし)」と明記する。発言の捏造は絶対にしない。
+3. 絞り込み: improvements の冒頭は必ず「🎯 最重要改善ポイント(1つだけ)」とし、今回一番効果が大きい改善を引用+書き換え例つきで厚く書く。その他の改善点は「その他」として簡潔に(各1〜2行)。あれもこれも指摘して総花的にしない。
 
 【処理手順】
 1. 添付の音声ファイルを最初から最後まで聴いて、日本語で文字起こし
@@ -205,40 +218,161 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
   }},
   "scores": {{"hearing": <int>, "proposal": <int>, "closing": <int>, "tone": <int>}},
   "session_summary": "<カウンセリング録音の要約(お客様の年齢/職業/主訴/提案内容/お客様の反応の流れを箇条書きで200〜400字程度・マークダウン)>",
-  "good_points": "<良かったポイントを具体的に3つ箇条書き(マークダウン)。7つの感のどれが機能していたか言及>",
-  "improvements": "<改善点を具体的に2つ箇条書き(マークダウン)。聞けなかったヒアリング項目を必ず先頭に列挙し、次回どう聞くかを具体例で示す。続けて7つの感・危機感トーク・3ヶ月提案・入会金無料・「他でもいい」フレーズのどれが不足していたかを必ず指摘し、松崎の上記スクリプトを引用しながらパーソナライズした改善案を提示>"
+  "good_points": "<良かったポイントを具体的に3つ箇条書き(マークダウン)。各項目は『実際の発言の引用「 」→なぜ良いか』の順で書き、最低1項目は必ずスタッフの実際の発言を「 」で引用する。7つの感のどれが機能していたか言及>",
+  "improvements": "<改善点(マークダウン)。構成は必ず次の順番: ①聞けなかったヒアリング項目を簡潔に列挙し次回どう聞くか一言添える ②『🎯 最重要改善ポイント』を1つだけ選び、実際の発言の引用(▼実際の発言)→松崎メソッドに沿った書き換え例(▼こう言い換える)のビフォー→アフター形式で厚く書く。7つの感・危機感トーク・3ヶ月提案・入会金無料・「他でもいい」フレーズの不足と、参考にした松崎FB事例の着眼点をここに反映 ③『その他』として残りの改善点を各1〜2行で簡潔に>"
 }}
 
 JSONのみ出力。コメントや説明は不要。
+session_summary / good_points / improvements は必ず1つの文字列で出力する(配列にしない)。
 """
 
 
-def fetch_leader_fb_examples(n: int = 3) -> str:
-    """Notion リーダーFB事例集から類似ケースを取得して要約"""
+def _notion_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+
+
+def _plain(props: dict, name: str) -> str:
+    """Notion プロパティ(rich_text/title/select)を素のテキストに変換"""
+    p = props.get(name, {}) or {}
+    if "rich_text" in p:
+        return "".join(t.get("plain_text", "") for t in p.get("rich_text", []))
+    if "title" in p:
+        return "".join(t.get("plain_text", "") for t in p.get("title", []))
+    if "select" in p:
+        sel = p.get("select") or {}
+        return sel.get("name", "")
+    return ""
+
+
+def _clean_slack_noise(text: str) -> str:
+    """Slack由来のノイズ(<@U...>メンション・:emoji:コード)を除去"""
+    text = re.sub(r"<@[A-Z0-9]+>", "", text)
+    text = re.sub(r":[a-z0-9_+-]+:", "", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _extract_matsuzaki_blocks(leader_fb: str) -> str:
+    """リーダーFB(Slackスレ返信の同期テキスト)から松崎さんの発言ブロックのみ抽出。
+
+    同期形式は「【名前 mm/dd hh:mm】\n本文」の繰り返し。名前に「松崎」を含む
+    ブロックだけ残す。1つも見つからなければ全文をそのまま返す(表示名変更に備える)。
+    """
+    parts = re.split(r"(?=【[^】\n]{1,40}】)", leader_fb)
+    picked = [p.strip() for p in parts if p.strip().startswith("【") and "松崎" in p.split("】", 1)[0]]
+    return "\n".join(picked) if picked else leader_fb
+
+
+def _fetch_history_fb_examples(contract: str, n: int) -> list:
+    """FB履歴DBから「リーダーFB(松崎さんのSlack返信)が付いた過去事例」を取得。
+
+    今回と同じ契約結果(入会あり/なし)の事例を優先し、新しい順に最大 n 件返す。
+    """
+    if not NOTION_TOKEN or not NOTION_FB_HISTORY_DB_ID:
+        return []
+    import requests
+    payload = {
+        "filter": {"property": "リーダーFB", "rich_text": {"is_not_empty": True}},
+        "sorts": [{"property": "セッション日", "direction": "descending"}],
+        "page_size": 40,
+    }
+    r = requests.post(
+        f"https://api.notion.com/v1/databases/{NOTION_FB_HISTORY_DB_ID.replace('-', '')}/query",
+        headers=_notion_headers(),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        timeout=20,
+    )
+    if r.status_code != 200:
+        return []
+    entries = []
+    for p in r.json().get("results", []):
+        props = p.get("properties", {})
+        leader_fb = _clean_slack_noise(_extract_matsuzaki_blocks(_plain(props, "リーダーFB").strip()))
+        if not leader_fb:
+            continue
+        entries.append({
+            "concerns": _plain(props, "悩み").strip(),
+            "contract": _plain(props, "契約結果").strip(),
+            "reason": _plain(props, "振り返り要約").strip(),
+            "fb": leader_fb,
+        })
+    # 今回と同じ契約結果の事例を先頭に(各グループ内は新しい順のまま)
+    same = [e for e in entries if contract and e["contract"] == contract]
+    other = [e for e in entries if e not in same]
+    picked = (same + other)[:n]
+    lines = []
+    for e in picked:
+        meta = []
+        if e["contract"]:
+            meta.append(f"契約結果={e['contract']}")
+        if e["concerns"]:
+            meta.append(f"悩み={e['concerns'][:80]}")
+        head = " / ".join(meta) if meta else "(詳細不明)"
+        body = e["fb"][:400]
+        block = f"◆ {head}"
+        if e["reason"]:
+            block += f"\n  状況: {e['reason'][:100]}"
+        block += f"\n  松崎FB: {body}"
+        lines.append(block)
+    return lines
+
+
+def _fetch_curated_fb_examples(n: int) -> list:
+    """(任意DB) リーダーFB事例集から最新の事例を取得"""
     if not NOTION_TOKEN or not NOTION_LEADER_FB_DB_ID:
-        return "(リーダーFB事例なし)"
+        return []
+    import requests
+    r = requests.post(
+        f"https://api.notion.com/v1/databases/{NOTION_LEADER_FB_DB_ID.replace('-', '')}/query",
+        headers=_notion_headers(),
+        data=json.dumps(
+            {"page_size": n, "sorts": [{"timestamp": "created_time", "direction": "descending"}]},
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        timeout=20,
+    )
+    if r.status_code != 200:
+        return []
+    lines = []
+    for p in r.json().get("results", [])[:n]:
+        props = p.get("properties", {})
+        situation = _plain(props, "状況").strip()
+        fb = _clean_slack_noise(_plain(props, "FB本文").strip())
+        if situation or fb:
+            lines.append(f"◆ 状況={situation[:120]}\n  松崎FB: {fb[:400]}")
+    return lines
+
+
+def fetch_leader_fb_examples(contract: str = "", n: int = 12) -> str:
+    """松崎(リーダー)の過去FBを事例集としてまとめて返す。
+
+    ソースは2つ:
+      1. FB履歴DBの「リーダーFB」(Slackスレの松崎さん返信を日次同期したもの) ← メイン
+      2. リーダーFB事例集DB(任意・手動キュレーション分)
+    今回と同じ契約結果の事例を優先。類似判定の最終選別はプロンプト側でAIが行う。
+    """
+    lines = []
     try:
-        import requests
-        H = {
-            "Authorization": f"Bearer {NOTION_TOKEN}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
-        }
-        r = requests.post(
-            f"https://api.notion.com/v1/databases/{NOTION_LEADER_FB_DB_ID.replace('-', '')}/query",
-            headers=H,
-            data=json.dumps({"page_size": n, "sorts": [{"timestamp": "created_time", "direction": "descending"}]}, ensure_ascii=False).encode("utf-8"),
-        )
-        examples = []
-        for p in r.json().get("results", [])[:n]:
-            props = p.get("properties", {})
-            situation = "".join([t.get("plain_text", "") for t in props.get("状況", {}).get("rich_text", [])])
-            fb = "".join([t.get("plain_text", "") for t in props.get("FB本文", {}).get("rich_text", [])])
-            if situation or fb:
-                examples.append(f"・状況: {situation[:100]}\n  FB: {fb[:200]}")
-        return "\n\n".join(examples) if examples else "(類似事例なし)"
-    except Exception as e:
-        return f"(取得失敗: {e})"
+        lines.extend(_fetch_history_fb_examples(contract, n))
+    except Exception:
+        pass
+    try:
+        lines.extend(_fetch_curated_fb_examples(3))
+    except Exception:
+        pass
+    # 完全重複の事例を除去(テストデータの二重登録などに備える)
+    seen = set()
+    deduped = []
+    for line in lines:
+        if line not in seen:
+            seen.add(line)
+            deduped.append(line)
+    if not deduped:
+        return "(リーダーFB事例なし ※事例がない場合はハリナチュレの新規対応哲学のみを基準にFBすること)"
+    return "\n\n".join(deduped[:n + 3])
 
 
 # ── 並列文字起こし用ヘルパー ──────────────────────
@@ -565,6 +699,22 @@ def _salvage_json(text: str) -> dict:
     return result
 
 
+def _normalize_text_fields(result: dict) -> dict:
+    """Gemini が文字列フィールドを配列で返すことがあるので文字列に正規化する
+    (例: good_points が ["…", "…"] → "- …\n- …")
+    """
+    if not isinstance(result, dict):
+        return result
+    for field in ("session_summary", "good_points", "improvements"):
+        v = result.get(field)
+        if isinstance(v, (list, tuple)):
+            items = [str(x).strip() for x in v if str(x).strip()]
+            result[field] = "\n".join(
+                i if i.startswith(("-", "*", "#", "🎯")) else f"- {i}" for i in items
+            )
+    return result
+
+
 def _parse_with_retry(model, response, generation_config, original_prompt):
     """JSON パース失敗時に1回だけ再生成を試みる"""
     try:
@@ -576,7 +726,7 @@ def _parse_with_retry(model, response, generation_config, original_prompt):
                 p.text for p in response.candidates[0].content.parts if hasattr(p, "text")
             ))
     try:
-        return json.loads(text)
+        return _normalize_text_fields(json.loads(text))
     except json.JSONDecodeError:
         # 再生成: テキストをパース可能な形に修正
         repair_prompt = (
@@ -589,7 +739,7 @@ def _parse_with_retry(model, response, generation_config, original_prompt):
                 generation_config=generation_config,
                 timeout=180,
             )
-            return json.loads(_extract_json(retry_response.text))
+            return _normalize_text_fields(json.loads(_extract_json(retry_response.text)))
         except Exception:
             # 最終手段: 正規表現で必要フィールドを救済抽出
             salvaged = _salvage_json(text)
@@ -621,7 +771,7 @@ def evaluate_from_transcript(transcript: str, staff_name: str, session_date,
             f"録音内容を確認してください(無音 / 録音失敗の可能性)"
         )
 
-    leader_fb = fetch_leader_fb_examples()
+    leader_fb = fetch_leader_fb_examples(contract=contract)
     contract_status = "🎉 契約獲得" if contract == "あり" else "🥲 契約なし(失注)"
     course_label = course if (contract == "あり" and course not in ("", "—", None)) else "(未入会)"
 
@@ -708,7 +858,7 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
 
     # ── ② プロンプト組み立て ──
     customer_info = customer_info or {}
-    leader_fb = fetch_leader_fb_examples()
+    leader_fb = fetch_leader_fb_examples(contract=contract)
     contract_status = "🎉 契約獲得" if contract == "あり" else "🥲 契約なし(失注)"
     course_label = course if (contract == "あり" and course not in ("", "—", None)) else "(未入会)"
     prompt = EVAL_PROMPT_TEMPLATE.format(
