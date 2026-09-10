@@ -440,6 +440,37 @@ def _gemini_call_with_retry(model, contents, generation_config=None, timeout=600
     raise RuntimeError(f"Gemini呼び出し失敗: {last_error}")
 
 
+# ── ffmpeg の場所 ──────────────────────────────
+# Streamlit Cloud では packages.txt(apt) で ffmpeg を入れていたが、
+# apt 側の不具合でアプリ全体が起動しなくなったことがある(2026-09-08)。
+# pip の imageio-ffmpeg に同梱されている ffmpeg を使えば apt に頼らずに済む。
+# ローカルなど、システムに ffmpeg があればそちらを優先する。
+def _ffmpeg() -> str:
+    import shutil
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        return sys_ffmpeg
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as e:
+        raise RuntimeError(
+            "ffmpeg が見つかりません。requirements.txt に imageio-ffmpeg を入れてください"
+        ) from e
+
+
+def _audio_duration_sec(audio_path: str) -> float:
+    """音声の長さ(秒)。imageio-ffmpeg には ffprobe が無いので ffmpeg の出力から読む"""
+    import subprocess
+    proc = subprocess.run([_ffmpeg(), "-hide_banner", "-i", audio_path],
+                          capture_output=True, text=True)
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", proc.stderr or "")
+    if not m:
+        raise RuntimeError("音声の長さを読み取れませんでした")
+    h, mi, se = int(m.group(1)), int(m.group(2)), float(m.group(3))
+    return h * 3600 + mi * 60 + se
+
+
 def compress_audio_if_large(audio_path: str, target_mb: float = 15.0) -> tuple:
     """ファイルが大きすぎたら ffmpegでビットレート下げて再エンコード
     - 32kbps モノラル AAC は人の声の文字起こしに十分(音楽用ではない)
@@ -454,7 +485,7 @@ def compress_audio_if_large(audio_path: str, target_mb: float = 15.0) -> tuple:
     output_path = f"{audio_path}.compressed.m4a"
     try:
         subprocess.run([
-            "ffmpeg", "-y", "-loglevel", "error",
+            _ffmpeg(), "-y", "-loglevel", "error",
             "-i", audio_path,
             "-b:a", "32k",   # 音声ビットレート 32kbps
             "-ac", "1",      # モノラル化
@@ -479,22 +510,8 @@ def split_audio_to_chunks(audio_path: str, chunk_minutes: int = CHUNK_MINUTES) -
     -c copy で再エンコードしないので超高速&メモリ消費小
     """
     import subprocess
-    # ① 全体長(秒)を ffprobe で取得
-    try:
-        duration_str = subprocess.check_output([
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0",
-            audio_path,
-        ], stderr=subprocess.STDOUT).decode().strip()
-        duration_sec = float(duration_str)
-    except FileNotFoundError:
-        raise RuntimeError(
-            "ffmpeg/ffprobe が見つかりません。Streamlit Cloud では packages.txt に "
-            "'ffmpeg' を追加してください(ローカルは brew install ffmpeg)"
-        )
-    except (subprocess.CalledProcessError, ValueError) as e:
-        raise RuntimeError(f"音声の長さ取得失敗(ffprobe): {e}")
+    # ① 全体長(秒)を取得（ffprobe は使わない。imageio-ffmpeg に含まれないため）
+    duration_sec = _audio_duration_sec(audio_path)
 
     chunk_sec = chunk_minutes * 60
     chunks = []
@@ -508,7 +525,7 @@ def split_audio_to_chunks(audio_path: str, chunk_minutes: int = CHUNK_MINUTES) -
         # -ss を -i の前に置くと高速シーク
         try:
             subprocess.run([
-                "ffmpeg", "-y", "-loglevel", "error",
+                _ffmpeg(), "-y", "-loglevel", "error",
                 "-ss", str(start),
                 "-i", audio_path,
                 "-t", str(chunk_sec),
@@ -518,7 +535,7 @@ def split_audio_to_chunks(audio_path: str, chunk_minutes: int = CHUNK_MINUTES) -
         except subprocess.CalledProcessError as e:
             # -c copy が失敗した場合(m4a等で再エンコード必要)はフォールバック
             subprocess.run([
-                "ffmpeg", "-y", "-loglevel", "error",
+                _ffmpeg(), "-y", "-loglevel", "error",
                 "-ss", str(start),
                 "-i", audio_path,
                 "-t", str(chunk_sec),
