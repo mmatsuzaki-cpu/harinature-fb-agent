@@ -773,6 +773,25 @@ def _parse_with_retry(model, response, generation_config, original_prompt):
             )
 
 
+def _customer_hint(customer_info) -> str:
+    """スタッフが報告で入力したお客様情報をプロンプトに足す(音声からの推測より優先させる)。
+    2026-09-13: 50代のお客様をAIが30代と書いてしまうことがあったため。「不明」は渡さない。"""
+    ci = customer_info or {}
+    lines = []
+    age = str(ci.get("age") or "").strip()
+    if age and age not in ("不明", "—", "-"):
+        lines.append(f"- 年齢層: {age}")
+    history = str(ci.get("history") or "").strip()
+    if history:
+        lines.append(f"- 既往歴: {history}")
+    if not lines:
+        return ""
+    return ("\n\n【スタッフが報告したお客様情報(音声からの推測より優先・必ずこれに合わせる)】\n"
+            + "\n".join(lines)
+            + "\ncustomer_info の age / history と、session_summary 等に書く年代はこの情報に合わせること。"
+              "年代を推測で書き換えない。")
+
+
 def evaluate_from_transcript(transcript: str, staff_name: str, session_date,
                               customer_info: dict = None,
                               contract: str = "なし", course: str = "—", store: str = "") -> dict:
@@ -804,6 +823,7 @@ def evaluate_from_transcript(transcript: str, staff_name: str, session_date,
         "添付された新人スタッフの新規カウンセリング録音を直接聴いて評価します。",
         "新人スタッフの新規カウンセリング文字起こしを評価します。"
     )
+    text_prompt += _customer_hint(customer_info)
     text_prompt += f"\n\n【カウンセリング文字起こし】\n{transcript[:200000]}\n"
     # ★重要: transcriptは既に取得済みなので再出力させない(ループ暴走防止)
     text_prompt += (
@@ -886,6 +906,7 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
         course_label=course_label,
         leader_fb_examples=leader_fb,
     )
+    prompt += _customer_hint(customer_info)
 
     # ── ③ Gemini 呼び出し(音声 + プロンプト) - 429リトライ対応 ──
     model = genai.GenerativeModel("gemini-2.5-flash")
@@ -1526,10 +1547,13 @@ def analyze_session(audio_file, staff_name: str, session_date,
         result["questions"] = questions
         # customer_info: フォーム入力があればそれを優先、
         # 空(ハリナチュレは録音から自動抽出)なら Gemini 抽出結果を保持
-        if customer_info:
-            result["customer_info"] = customer_info
-        else:
-            result["customer_info"] = result.get("customer_info") or {}
+        # (ハリナチュレは年齢・既往歴だけ報告で入力するので、それ以外は音声からの抽出を残す)
+        merged = result.get("customer_info")
+        merged = dict(merged) if isinstance(merged, dict) else {}
+        for k, v in (customer_info or {}).items():
+            if v and str(v).strip() not in ("不明", "—", "-"):
+                merged[k] = v
+        result["customer_info"] = merged
 
         # ── Slack送信(失敗してもFB結果は返す: どこで落ちたか切り分け) ──
         try:
