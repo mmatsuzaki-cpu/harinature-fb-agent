@@ -949,19 +949,247 @@ def _slack_api(api_method: str, payload: dict = None, method: str = "post", para
     return r.json()
 
 
-def _fmt_fb_text(text: str) -> str:
-    """Gemini出力のマークダウンを Slack mrkdwn 向けに整形
+def _fmt_fb_text(text) -> str:
+    """Gemini出力を Slack mrkdwn / 画面表示向けに整形
+    - list/dict で返ってきた場合も各要素を改行区切りに展開(repr化を防ぐ)
+    - literal な "\\n" を本物の改行に変換
     - 見出し記号(#, ##)を除去
     - **太字** → *太字*(Slack mrkdwn)
     - 行頭の箇条書き `- ` / `* ` を `• ` に統一
+    - 箇条書きの前に空行を入れてスマホで読みやすく
     """
-    if not text:
+    if text is None or text == "":
         return ""
-    s = str(text).strip()
-    s = re.sub(r'^\s{0,3}#{1,6}\s*', '', s, flags=re.MULTILINE)   # 見出し除去
+
+    # ── list / dict は要素ごとに展開(Python repr にしない) ──
+    if isinstance(text, (list, tuple)):
+        # 配列の1要素=1項目なので、記号がなければ箇条書きにする
+        parts = [_fmt_fb_text(v) for v in text if v]
+        s = "\n".join(x if x.lstrip().startswith(("•", "・")) else "• " + x for x in parts)
+    elif isinstance(text, dict):
+        s = "\n".join(f"{k}: {_fmt_fb_text(v)}" for k, v in text.items())
+    else:
+        s = str(text)
+
+    s = s.replace("\\n", "\n").strip()                             # literal \n を改行に
+    s = re.sub(r'^\s{0,3}#{1,6}\s*', '', s, flags=re.MULTILINE)    # 見出し除去
     s = re.sub(r'\*\*(.+?)\*\*', r'*\1*', s)                       # 太字記法変換
     s = re.sub(r'^\s*[-*]\s+', '• ', s, flags=re.MULTILINE)        # 箇条書き統一
+
+    # 箇条書き行の前に空行を入れて読みやすく(連続する箇条書きはそのまま)
+    lines = s.split("\n")
+    out = []
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if stripped.startswith("•") and out and out[-1].strip() and not out[-1].strip().startswith("•"):
+            out.append("")
+        out.append(ln)
+    s = "\n".join(out)
+
+    s = re.sub(r'\n{3,}', '\n\n', s)                               # 空行3つ以上→2つ
     return s.strip()
+
+
+# ── Slack向けの改行整形 ──
+# Gemini の出力は長い段落や見出しの書き方がバラバラで、スマホだと読みづらい。
+# 1文ずつ改行し、見出しをそろえ、発言の引用は引用ブロック(>)に分ける。
+_SENT_END = "。！？!?"
+_BR_OPEN, _BR_CLOSE = "「『（(【", "」』）)】"
+_FB_HEAD_RE = re.compile(
+    r'^(?:[•・]\s*|\d+\s*[.)．]\s*|[①-⑩]\s*)?(?:🎯|:dart:)?\s*\*?\s*(?:🎯|:dart:)?\s*'
+    r'(聞けなかった(?:ヒアリング)?項目|最重要改善ポイント|その他(?:の改善点)?)'
+    r'\s*(?:[（(][^）)]{0,10}[）)])?\s*\*?\s*(?:[:：]\s*(.*)|\s+(.+))?$')
+_FB_HEAD_TITLE = {"聞": "📝 *聞けなかったヒアリング項目*",
+                  "最": "🎯 *最重要改善ポイント*",
+                  "そ": "📌 *その他*"}
+# 箇条書き先頭の「ラベル: 本文」(例: 食事: 〜 / 親近感と共感の醸成: 「〜」)
+_FB_LABEL_RE = re.compile(r'^\*?([^「」『』。、:：*\s][^「」『』。、:：*]{0,19}?)\*?\s*[:：]\s*(.+)$')
+_FB_COMPACT_LEN = 70    # 箇条書きが全部この文字数以下なら、項目の間に空行を入れない
+
+
+def _split_sentences(s: str, min_len: int = 6) -> list:
+    """句点で1文ずつに分ける。カギカッコの中では切らない。
+    短すぎる断片(「うん。」など)は前の文にくっつける"""
+    parts, buf, depth = [], "", 0
+    for ch in s:
+        buf += ch
+        if ch in _BR_OPEN:
+            depth += 1
+        elif ch in _BR_CLOSE:
+            depth = max(0, depth - 1)
+        elif ch in _SENT_END and depth == 0:
+            parts.append(buf)
+            buf = ""
+    parts.append(buf)
+    out = []
+    for p in (x.strip() for x in parts):
+        if not p:
+            continue
+        if out and len(p) < min_len:
+            out[-1] += p
+        else:
+            out.append(p)
+    return out
+
+
+def _split_arrow(s: str) -> list:
+    """「〜」→ 説明 / 項目 → 次回どう聞くか の「→」の前で改行する"""
+    segs = re.split(r'(?:(?<=[」』）)])\s*|\s+)(?=→)', s)
+    return [re.sub(r'^→\s*', '→ ', x.strip()) for x in segs if x.strip()]
+
+
+def _fix_bold_line(line: str) -> str:
+    """Slackの太字は開始*の直前・終了*の直後が空白か行頭行末でないと効かない。
+    日本語に * が隣接していると記号のまま出るので半角スペースを補う(backend._fix_bold と同じ考え方)"""
+    if "*" not in line or line.count("*") % 2:
+        return line
+    buf, opening = "", True
+    for i, ch in enumerate(line):
+        if ch != "*":
+            buf += ch
+            continue
+        if opening:
+            if buf and not buf.endswith((" ", "\t")):
+                buf += " "
+            buf += ch
+        else:
+            buf += ch
+            nxt = line[i + 1] if i + 1 < len(line) else ""
+            if nxt and nxt not in " \t":
+                buf += " "
+        opening = not opening
+    return buf
+
+
+def _quote_then_arrow(s: str) -> bool:
+    """先頭が発言の引用で、そのあとが「→ 説明」だけか(良かった点の形)。
+    「〜」の先に〜 のように文の一部として引用しているときは False"""
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch in _BR_OPEN:
+            depth += 1
+        elif ch in _BR_CLOSE and depth > 0:
+            depth -= 1
+            if depth == 0:
+                nxt = s[i + 1:].lstrip()
+                if nxt.startswith(("「", "『")):
+                    continue                     # 「〜」「〜」と引用が続く
+                return not nxt or nxt.startswith("→")
+    return False
+
+
+def _bullet_lines(body: str, split_sent: bool = True) -> list:
+    """箇条書き1項目を、ラベル・引用・→説明・1文ずつに分けた行のリストにする。
+    split_sent=False(短い項目の一覧)のときは → の前だけで改行する"""
+    first_prefix = "• "
+    lines = []
+    m = _FB_LABEL_RE.match(body)
+    if m:
+        label, rest = m.group(1).strip(), m.group(2).strip()
+        if rest.startswith(("「", "『")) and _quote_then_arrow(rest):
+            lines.append(f"• *{label}*")        # 発言の引用が続くときはラベルだけで1行
+            first_prefix = ""
+            body = rest
+        else:
+            body = f"*{label}* {rest}"           # 短い項目はラベルを太字にして同じ行に
+    for seg in _split_arrow(body):
+        for sent in (_split_sentences(seg) if split_sent else [seg]):
+            lines.append(first_prefix + sent)
+            first_prefix = ""
+    return lines or ["• " + body]
+
+
+def _quote_lines(label: str, text: str) -> list:
+    """▼実際の発言 / ▼こう言い換える を「見出し1行＋引用ブロック」にする。
+    言い換え例は長いので1文ずつ改行する(実際の発言は録音の断片なので切らない)"""
+    text = text.strip()
+    if "言い換" in label and text.startswith("「") and text.endswith("」"):
+        sents = _split_sentences(text[1:-1])
+        if sents:
+            sents[0] = "「" + sents[0]
+            sents[-1] = sents[-1] + "」"
+    else:
+        sents = [text] if text else []
+    return [f"▼{label}"] + [f"> {x}" for x in sents]
+
+
+def _slack_readable(text: str) -> str:
+    """_fmt_fb_text 済みの文章を、Slackのスマホ表示で読みやすい改行に組み直す"""
+    if not text:
+        return ""
+    s = str(text).replace("『「", "「").replace("」』", "」")
+    s = re.sub(r'(?<=[^\s•・])[ \t]*(?=▼)', '\n', s)  # 行の途中の ▼ は行頭へ
+
+    # ① 行を「見出し / 箇条書き / 引用 / 段落」に分類する
+    items = []            # [kind, payload]
+    prev_blank = True
+    for raw in s.split("\n"):
+        line = raw.strip()
+        if not line:
+            prev_blank = True
+            continue
+        mh = _FB_HEAD_RE.match(line)
+        if mh:
+            items.append(["head", _FB_HEAD_TITLE[mh.group(1)[0]]])
+            rest = (mh.group(2) or mh.group(3) or "").strip()
+            if rest:
+                items.append(["para", rest])
+        elif line.lstrip("•・ ").startswith("▼"):
+            mq = re.match(r'^[•・\s]*▼\s*([^:：「]*)[:：]?\s*(.*)$', line)
+            items.append(["quote", [mq.group(1).strip() or "発言", mq.group(2).strip()]])
+        elif line.startswith(("•", "・")):
+            body = line.lstrip("•・ ").strip()
+            if not body:
+                continue                                  # 記号だけの行は捨てる
+            items.append(["bullet", body])
+        elif (not prev_blank and items and items[-1][0] == "bullet"
+              and (line.startswith("→") or raw[:1] in (" ", "\t", "　"))):
+            items[-1][1] += "\n" + line                   # 箇条書きの続きの行
+        elif not prev_blank and items and items[-1][0] == "quote" and not items[-1][1][1]:
+            items[-1][1][1] = line                        # ▼ラベルの次の行に引用本文
+        else:
+            items.append(["para", line])
+        prev_blank = False
+
+    # ② 箇条書きのまとまりごとに「詰めて並べるか」を決める(短い項目の一覧は空行なし)
+    compact = [False] * len(items)
+    i = 0
+    while i < len(items):
+        if items[i][0] != "bullet":
+            i += 1
+            continue
+        j = i
+        while j < len(items) and items[j][0] == "bullet":
+            j += 1
+        is_compact = max(len(items[k][1]) for k in range(i, j)) <= _FB_COMPACT_LEN
+        for k in range(i, j):
+            compact[k] = is_compact
+        i = j
+
+    # ③ 組み立て: 見出しの直後と、詰める箇条書きの間だけ空行を入れない
+    out = []
+    prev_kind = None
+    for idx, (kind, payload) in enumerate(items):
+        if kind == "head":
+            lines = [payload]
+        elif kind == "bullet":
+            split_sent = not compact[idx]
+            lines = []
+            for part in payload.split("\n"):
+                lines += _bullet_lines(part, split_sent) if not lines else [
+                    x for seg in _split_arrow(part)
+                    for x in (_split_sentences(seg) if split_sent else [seg])]
+        elif kind == "quote":
+            lines = _quote_lines(*payload)
+        else:
+            # 短い段落はそのまま(1文ずつ切るのは長い段落だけ)
+            lines = _split_sentences(payload) if len(payload) > _FB_COMPACT_LEN else [payload]
+        if out and prev_kind != "head" and not (
+                kind == "bullet" and prev_kind == "bullet" and compact[idx]):
+            out.append("")
+        out += lines
+        prev_kind = kind
+    return "\n".join(_fix_bold_line(x) for x in out)
 
 
 def send_slack_notifications(staff_name: str, session_date, result: dict) -> dict:
@@ -981,15 +1209,17 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
     contract = result.get("contract", "なし")
     course = result.get("course", "—")
     if contract == "あり" and course not in ("", "—", None):
-        contract_line = f"🎉 *契約獲得*（{course}）"
+        # 太字の直後に全角カッコが続くとSlackで太字が効かないので、半角スペース＋半角カッコにする
+        contract_line = f"🎉 *契約獲得* ({course})"
     elif contract == "あり":
         contract_line = "🎉 *契約獲得*"
     else:
         contract_line = "🥲 *契約なし*"
 
-    session_summary = _fmt_fb_text(result.get("session_summary", "(要約なし)"))
-    good_points = _fmt_fb_text(result.get("good_points", ""))
-    improvements = _fmt_fb_text(result.get("improvements", ""))
+    # スマホで読みやすいよう、1文ずつ改行・見出しをそろえる・発言は引用ブロックに
+    session_summary = _slack_readable(_fmt_fb_text(result.get("session_summary", "(要約なし)")))
+    good_points = _slack_readable(_fmt_fb_text(result.get("good_points", "")))
+    improvements = _slack_readable(_fmt_fb_text(result.get("improvements", "")))
 
     # ── ヒアリングチェックリスト整形(縦並びで見やすく) ──
     checklist = result.get("hearing_checklist", {}) or {}
