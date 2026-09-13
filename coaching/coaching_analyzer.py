@@ -1242,8 +1242,8 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
     good_points = _slack_readable(_fmt_fb_text(result.get("good_points", "")))
     improvements = _slack_readable(_fmt_fb_text(result.get("improvements", "")))
 
-    # ── ヒアリングチェックリスト整形 ──
-    # 16項目を1行ずつ並べると長いので「できた／できなかった」の2行にまとめる(2026-09-13 松崎指示)
+    # ── ヒアリングチェックリスト整形(縦並びで見やすく) ──
+    # 2行にまとめる形は松崎さんの判断で元の縦並びに戻した(2026-09-13)
     checklist = result.get("hearing_checklist", {}) or {}
     if not isinstance(checklist, dict):
         checklist = {}
@@ -1254,15 +1254,15 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
             return v.strip().lower() in ("true", "yes", "1", "○", "✓", "✅")
         return bool(v)
 
-    done = [str(item) for item, v in checklist.items() if _is_done(v)]
-    not_done = [str(item) for item, v in checklist.items() if not _is_done(v)]
+    achieved = sum(1 for v in checklist.values() if _is_done(v))
+    total = len(checklist)
     checklist_block = ""
     if checklist:
+        lines = [f"{'✅' if _is_done(ok) else '⬜️'} {item}" for item, ok in checklist.items()]
         checklist_block = (
             f"\n\n━━━━━━━━━━━━━━\n"
-            f"🔍 *ヒアリング項目*　{len(done)}/{len(checklist)} 項目クリア\n\n"
-            f"✅ できた：{'・'.join(done) or 'なし'}\n"
-            f"⬜️ できなかった：{'・'.join(not_done) or 'なし'}"
+            f"🔍 *ヒアリング項目*　{achieved}/{total} 項目クリア\n\n"
+            + "\n".join(lines)
         )
 
     store = result.get("store", "")
