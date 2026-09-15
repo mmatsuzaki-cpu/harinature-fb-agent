@@ -114,8 +114,10 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 
 ■ 入会金無料の伝え方(最後にお得情報として)
 最初から押さない。「やりたい」「必要だ」「任せたい」と思ってもらってから:
-「本日ご入会の場合は入会金が0円になります。
-今日の施術料金も0円になるので、かなりお得に始めていただけます。」
+「本日ご入会の場合は、入会金と事務手数料が0円になります。
+かなりお得に始めていただけます。」
+※料金の事実(厳守): 本日入会で無料になるのは「入会金」と「事務手数料」だけ。
+  初回体験料金(今日の施術料金)はかかる。「今日の施術料金も0円」「今日の施術が無料」とは絶対に書かない。
 
 ■ 最低限意識すべき3つ(完璧じゃなくてOK)
 1. 悩みだけで終わらず、その悩みの原因まで説明する
@@ -173,6 +175,8 @@ EVAL_PROMPT_TEMPLATE = """あなたは定額制の美容鍼サロン「HARI NATU
 - 「7つの感」のどれが弱かったかを必ず1つ以上指摘
 - 危機感トーク・3ヶ月提案・入会金無料トークが入っていたか言及
 - 「ハリナチュレじゃなくてもいい」フレーズが入っていたか確認
+- 料金の説明・書き換え例では「入会金と事務手数料が無料(初回体験料金はかかる)」を守る。
+  「今日の施術が無料/0円」という誤った案内を書かない(スタッフがそう言っていたら誤りとして指摘する)
 - 改善提案は上記スクリプトをベースに、お客様の状況に合わせてパーソナライズ
 
 【FBの書き方ルール(質の担保・厳守)】
@@ -1017,7 +1021,8 @@ def _fmt_fb_text(text) -> str:
 _SENT_END = "。！？!?"
 _BR_OPEN, _BR_CLOSE = "「『（(【", "」』）)】"
 _FB_HEAD_RE = re.compile(
-    r'^(?:[•・]\s*|\d+\s*[.)．]\s*|[①-⑩]\s*)?(?:🎯|:dart:)?\s*\*?\s*(?:🎯|:dart:)?\s*'
+    r'^(?:[•・]\s*|\d+\s*[.)．]\s*|[①-⑩]\s*)?(?:🎯|📝|📌|:dart:|:memo:|:pushpin:)?\s*\*?\s*'
+    r'(?:🎯|📝|📌|:dart:|:memo:|:pushpin:)?\s*'
     r'(聞けなかった(?:ヒアリング)?項目|最重要改善ポイント|その他(?:の改善点)?)'
     r'\s*(?:[（(][^）)]{0,10}[）)])?\s*\*?\s*(?:[:：]\s*(.*)|\s+(.+))?$')
 _FB_HEAD_TITLE = {"聞": "📝 *聞けなかったヒアリング項目*",
@@ -1025,22 +1030,33 @@ _FB_HEAD_TITLE = {"聞": "📝 *聞けなかったヒアリング項目*",
                   "そ": "📌 *その他*"}
 # 箇条書き先頭の「ラベル: 本文」(例: 食事: 〜 / 親近感と共感の醸成: 「〜」)
 _FB_LABEL_RE = re.compile(r'^\*?([^「」『』。、:：*\s][^「」『』。、:：*]{0,19}?)\*?\s*[:：]\s*(.+)$')
+# 太字で書かれたラベル(例: *「ハリナチュレじゃなくてもいい」フレーズの導入*: 〜)
+_FB_BOLD_LABEL_RE = re.compile(r'^\*([^*]{1,40})\*\s*[:：]\s*(.+)$')
 _FB_COMPACT_LEN = 70    # 箇条書きが全部この文字数以下なら、項目の間に空行を入れない
 
 
-def _split_sentences(s: str, min_len: int = 6) -> list:
-    """句点で1文ずつに分ける。カギカッコの中では切らない。
-    短すぎる断片(「うん。」など)は前の文にくっつける"""
+def _split_sentences(s: str, min_len: int = 4) -> list:
+    """「。」で1文ずつに分ける。セリフ(カギカッコ)の中の「。」でも切る
+    (2026-09-16 松崎指示: SlackのスマホUIは改行がないと読みにくい)。
+    「！」「？」はカギカッコの外だけで切る(セリフの途中の問いかけでは切らない)。
+    「。」の直後の閉じカッコは同じ行に付け、短すぎる断片(「はい。」など)は前の文にくっつける"""
     parts, buf, depth = [], "", 0
-    for ch in s:
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
         buf += ch
         if ch in _BR_OPEN:
             depth += 1
         elif ch in _BR_CLOSE:
             depth = max(0, depth - 1)
-        elif ch in _SENT_END and depth == 0:
+        if ch == "。" or (ch in _SENT_END and depth == 0):
+            while i + 1 < n and s[i + 1] in _BR_CLOSE:
+                i += 1
+                buf += s[i]
+                depth = max(0, depth - 1)
             parts.append(buf)
             buf = ""
+        i += 1
     parts.append(buf)
     out = []
     for p in (x.strip() for x in parts):
@@ -1082,6 +1098,17 @@ def _fix_bold_line(line: str) -> str:
     return buf
 
 
+def _open_depth(s: str) -> int:
+    """閉じていないカギカッコの数(引用が次の行に続いているかの判定用)"""
+    depth = 0
+    for ch in s:
+        if ch in _BR_OPEN:
+            depth += 1
+        elif ch in _BR_CLOSE and depth > 0:
+            depth -= 1
+    return depth
+
+
 def _quote_then_arrow(s: str) -> bool:
     """先頭が発言の引用で、そのあとが「→ 説明」だけか(良かった点の形)。
     「〜」の先に〜 のように文の一部として引用しているときは False"""
@@ -1099,14 +1126,14 @@ def _quote_then_arrow(s: str) -> bool:
     return False
 
 
-def _bullet_lines(body: str, split_sent: bool = True) -> list:
-    """箇条書き1項目を、ラベル・引用・→説明・1文ずつに分けた行のリストにする。
-    split_sent=False(短い項目の一覧)のときは → の前だけで改行する"""
+def _bullet_lines(body: str) -> list:
+    """箇条書き1項目を、ラベル・引用・→説明・1文ずつに分けた行のリストにする"""
     first_prefix = "• "
     lines = []
-    m = _FB_LABEL_RE.match(body)
+    m = _FB_LABEL_RE.match(body) or _FB_BOLD_LABEL_RE.match(body)
     if m:
         label, rest = m.group(1).strip(), m.group(2).strip()
+        rest = re.sub(r'^[*\-•・]\s+', '', rest)   # 「ラベル: * 本文」の余計な記号
         if rest.startswith(("「", "『")) and _quote_then_arrow(rest):
             lines.append(f"• *{label}*")        # 発言の引用が続くときはラベルだけで1行
             first_prefix = ""
@@ -1114,7 +1141,7 @@ def _bullet_lines(body: str, split_sent: bool = True) -> list:
         else:
             body = f"*{label}* {rest}"           # 短い項目はラベルを太字にして同じ行に
     for seg in _split_arrow(body):
-        for sent in (_split_sentences(seg) if split_sent else [seg]):
+        for sent in _split_sentences(seg):
             lines.append(first_prefix + sent)
             first_prefix = ""
     return lines or ["• " + body]
@@ -1122,15 +1149,9 @@ def _bullet_lines(body: str, split_sent: bool = True) -> list:
 
 def _quote_lines(label: str, text: str) -> list:
     """▼実際の発言 / ▼こう言い換える を「見出し1行＋引用ブロック」にする。
-    言い換え例は長いので1文ずつ改行する(実際の発言は録音の断片なので切らない)"""
+    どちらも「。」ごとに改行する(2026-09-16 松崎指示)"""
     text = text.strip()
-    if "言い換" in label and text.startswith("「") and text.endswith("」"):
-        sents = _split_sentences(text[1:-1])
-        if sents:
-            sents[0] = "「" + sents[0]
-            sents[-1] = sents[-1] + "」"
-    else:
-        sents = [text] if text else []
+    sents = _split_sentences(text) if text else []
     return [f"▼{label}"] + [f"> {x}" for x in sents]
 
 
@@ -1149,12 +1170,14 @@ def _slack_readable(text: str) -> str:
         if not line:
             prev_blank = True
             continue
+        if re.fullmatch(r"[*\-•・]+", line):
+            continue                                      # 「*」だけの行など
         mh = _FB_HEAD_RE.match(line)
         if mh:
             items.append(["head", _FB_HEAD_TITLE[mh.group(1)[0]]])
             rest = (mh.group(2) or mh.group(3) or "").strip()
             if rest:
-                items.append(["para", rest])
+                items.append(["title", rest])             # 見出しの横に書かれた一言(本文とは分ける)
         elif line.lstrip("•・ ").startswith("▼"):
             mq = re.match(r'^[•・\s]*▼\s*([^:：「]*)[:：]?\s*(.*)$', line)
             items.append(["quote", [mq.group(1).strip() or "発言", mq.group(2).strip()]])
@@ -1163,11 +1186,13 @@ def _slack_readable(text: str) -> str:
             if not body:
                 continue                                  # 記号だけの行は捨てる
             items.append(["bullet", body])
-        elif (not prev_blank and items and items[-1][0] == "bullet"
-              and (line.startswith("→") or raw[:1] in (" ", "\t", "　"))):
-            items[-1][1] += "\n" + line                   # 箇条書きの続きの行
-        elif not prev_blank and items and items[-1][0] == "quote" and not items[-1][1][1]:
-            items[-1][1][1] = line                        # ▼ラベルの次の行に引用本文
+        elif not prev_blank and items and items[-1][0] == "bullet":
+            items[-1][1] += "\n" + line                   # 箇条書きの続きの行(空行をはさまない行)
+        elif (not prev_blank and items and items[-1][0] == "quote"
+              and (not items[-1][1][1] or _open_depth(items[-1][1][1]) > 0)):
+            items[-1][1][1] += line                       # ▼ラベルの次の行・閉じていない引用の続き
+        elif not prev_blank and items and items[-1][0] == "para":
+            items[-1][1] += "\n" + line                   # 同じ段落の続きの行(空行を入れない)
         else:
             items.append(["para", line])
         prev_blank = False
@@ -1194,17 +1219,14 @@ def _slack_readable(text: str) -> str:
         if kind == "head":
             lines = [payload]
         elif kind == "bullet":
-            split_sent = not compact[idx]
             lines = []
             for part in payload.split("\n"):
-                lines += _bullet_lines(part, split_sent) if not lines else [
-                    x for seg in _split_arrow(part)
-                    for x in (_split_sentences(seg) if split_sent else [seg])]
+                lines += _bullet_lines(part) if not lines else [
+                    x for seg in _split_arrow(part) for x in _split_sentences(seg)]
         elif kind == "quote":
             lines = _quote_lines(*payload)
-        else:
-            # 短い段落はそのまま(1文ずつ切るのは長い段落だけ)
-            lines = _split_sentences(payload) if len(payload) > _FB_COMPACT_LEN else [payload]
+        else:   # para / title
+            lines = [x for part in payload.split("\n") for x in _split_sentences(part)]
         if out and prev_kind != "head" and not (
                 kind == "bullet" and prev_kind == "bullet" and compact[idx]):
             out.append("")
