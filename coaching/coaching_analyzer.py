@@ -984,7 +984,8 @@ def call_gemini_with_audio(audio_path: str, staff_name: str, session_date,
 
 # ── 3. Slack通知 ──────────────────────────────────
 
-def _slack_api(api_method: str, payload: dict = None, method: str = "post", params: dict = None) -> dict:
+def _slack_api(api_method: str, payload: dict = None, method: str = "post", params: dict = None,
+               token: str = "") -> dict:
     """Slack Web API 共通ラッパー
     - 日本語を含む body は ensure_ascii=False + utf-8 エンコードで送る
       (latin-1 エンコードエラー回避)
@@ -993,7 +994,7 @@ def _slack_api(api_method: str, payload: dict = None, method: str = "post", para
     """
     import requests
     url = f"https://slack.com/api/{api_method}"
-    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
+    headers = {"Authorization": f"Bearer {token or SLACK_BOT_TOKEN}"}
     if method == "get":
         r = requests.get(url, headers=headers, params=params or {}, timeout=30)
     else:
@@ -1264,14 +1265,20 @@ def _slack_readable(text: str) -> str:
     return "\n".join(_fix_bold_line(x) for x in out)
 
 
-def send_slack_notifications(staff_name: str, session_date, result: dict) -> dict:
+def send_slack_notifications(staff_name: str, session_date, result: dict,
+                             token: str = "", channel: str = "") -> dict:
     """Slack に通知:
     ① #ハリナチュレ_新規振り返り チャンネル投稿(全員見れる)
     ② 松崎さん完了通知DM
     返り値: {"ts": "1234567890.123456", "permalink": "https://..."}
             (リーダーFB同期スクリプトが後でスレッド返信を引っ張ってくる用)
     """
-    if not SLACK_BOT_TOKEN:
+    # 投稿先は呼び出し側から受け取る。モジュール変数だけに頼ると、複数店舗の解析が
+    # 同時に走ったときに互いの設定を上書きしてしまう
+    # (2026-09-20 名古屋店のFBがDEOのチャンネルに、梅田店のFBが直営のチャンネルに流れた)
+    token = token or SLACK_BOT_TOKEN
+    channel = channel or SLACK_FEEDBACK_CHANNEL_ID
+    if not token:
         return {}
 
     scores = result.get("scores", {})
@@ -1350,7 +1357,7 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
     # ① チャンネル投稿(各呼び出しを独立させ1つ失敗しても継続)
     try:
         post_res = _slack_api("chat.postMessage",
-                              {"channel": SLACK_FEEDBACK_CHANNEL_ID, "text": channel_msg})
+                              {"channel": channel, "text": channel_msg}, token=token)
         ts = post_res.get("ts", "")
     except Exception as e:
         print(f"[Slack postMessage] {e}")
@@ -1359,7 +1366,7 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
     if ts:
         try:
             pl = _slack_api("chat.getPermalink", None, method="get",
-                            params={"channel": SLACK_FEEDBACK_CHANNEL_ID, "message_ts": ts})
+                            params={"channel": channel, "message_ts": ts}, token=token)
             permalink = pl.get("permalink", "")
         except Exception as e:
             print(f"[Slack getPermalink] {e}")
@@ -1367,10 +1374,10 @@ def send_slack_notifications(staff_name: str, session_date, result: dict) -> dic
     # ③ 松崎さん完了DM(任意)
     if SLACK_OWNER_USER_ID:
         try:
-            dm_open = _slack_api("conversations.open", {"users": SLACK_OWNER_USER_ID})
+            dm_open = _slack_api("conversations.open", {"users": SLACK_OWNER_USER_ID}, token=token)
             if dm_open.get("ok"):
                 dm_id = dm_open["channel"]["id"]
-                _slack_api("chat.postMessage", {
+                _slack_api("chat.postMessage", token=token, payload={
                     "channel": dm_id,
                     "text": f"✅ *ハリナチュレ育成FB処理完了*\n{staff_name} さん（{session_date}）の評価が #ハリナチュレ_新規振り返り に投稿されました🪡",
                 })
@@ -1516,7 +1523,8 @@ def save_to_notion(staff_name: str, session_date, result: dict) -> str:
 def analyze_session(audio_file, staff_name: str, session_date,
                     customer_info: dict = None,
                     contract: str = "なし", course: str = "—", store: str = "",
-                    questions: str = "") -> dict:
+                    questions: str = "",
+                    slack_token: str = "", slack_channel: str = "") -> dict:
     """Streamlit から呼ばれるメインエントリ
     audio_file: streamlit UploadedFile
     customer_info: お客様情報 dict (age / job / concerns / history)
@@ -1608,7 +1616,8 @@ def analyze_session(audio_file, staff_name: str, session_date,
 
         # ── Slack送信(失敗してもFB結果は返す: どこで落ちたか切り分け) ──
         try:
-            slack_meta = send_slack_notifications(staff_name, session_date, result) or {}
+            slack_meta = send_slack_notifications(staff_name, session_date, result,
+                                                  token=slack_token, channel=slack_channel) or {}
             result["slack_ts"] = slack_meta.get("ts", "")
             result["slack_permalink"] = slack_meta.get("permalink", "")
         except Exception as e:
