@@ -1297,6 +1297,13 @@ def _slack_readable(text: str) -> str:
     return "\n".join(_fix_bold_line(x) for x in out)
 
 
+# 振り返りチャンネルへの投稿は、どのワークスペースでも同じ名前・アイコンで出す。
+# FC(ハリナチュレ全体WS)側はアプリ名が「コッシー」＋既定アイコンで、直営の「こっしー」と
+# 見た目が違っていたため、投稿ごとに名前とアイコンをそろえる(2026-09-24 松崎指示)。
+SLACK_FB_USERNAME = "こっしー"
+SLACK_FB_ICON_URL = "https://avatars.slack-edge.com/2026-05-01/11043639555348_4e4d726192421a788b7e_48.png"
+
+
 def send_slack_notifications(staff_name: str, session_date, result: dict,
                              token: str = "", channel: str = "") -> dict:
     """Slack に通知:
@@ -1393,7 +1400,9 @@ def send_slack_notifications(staff_name: str, session_date, result: dict,
     # ① チャンネル投稿(各呼び出しを独立させ1つ失敗しても継続)
     try:
         post_res = _slack_api("chat.postMessage",
-                              {"channel": channel, "text": channel_msg}, token=token)
+                              {"channel": channel, "text": channel_msg,
+                               "username": SLACK_FB_USERNAME,
+                               "icon_url": SLACK_FB_ICON_URL}, token=token)
         ts = post_res.get("ts", "")
     except Exception as e:
         print(f"[Slack postMessage] {e}")
