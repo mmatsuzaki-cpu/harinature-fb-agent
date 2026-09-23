@@ -1315,7 +1315,11 @@ def send_slack_notifications(staff_name: str, session_date, result: dict,
 
     scores = result.get("scores", {})
     avg = sum(scores.values()) / max(len(scores), 1)
-    star_line = f"ヒアリング ★{scores.get('hearing',0)}　／　提案 ★{scores.get('proposal',0)}　／　クロージング ★{scores.get('closing',0)}　／　トーン ★{scores.get('tone',0)}"
+    # スマホのSlackだと1行に並べると途中で折り返して読みにくいので、1項目ずつ改行する
+    star_line = (f"ヒアリング ★{scores.get('hearing',0)}\n"
+                 f"提案 ★{scores.get('proposal',0)}\n"
+                 f"クロージング ★{scores.get('closing',0)}\n"
+                 f"トーン ★{scores.get('tone',0)}")
 
     contract = result.get("contract", "なし")
     course = result.get("course", "—")
